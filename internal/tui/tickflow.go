@@ -145,7 +145,9 @@ func (m *actionModel) View() string {
 
 func pickTicketAction(ctx context.Context, out io.Writer) (TicketAction, error) {
 	m := newActionModel()
-	prog := tea.NewProgram(m, programOpts(ctx, out)...)
+	opts, cleanup := programOpts(ctx, out)
+	defer cleanup()
+	prog := tea.NewProgram(m, opts...)
 	final, err := prog.Run()
 	if err != nil {
 		return ActionCancelled, fmt.Errorf("tui: %w", err)
@@ -214,7 +216,9 @@ func (m *issueModel) View() string {
 
 func pickIssue(ctx context.Context, issues []linear.Issue, out io.Writer) (*linear.Issue, error) {
 	m := newIssueModel(issues)
-	prog := tea.NewProgram(m, programOpts(ctx, out)...)
+	opts, cleanup := programOpts(ctx, out)
+	defer cleanup()
+	prog := tea.NewProgram(m, opts...)
 	final, err := prog.Run()
 	if err != nil {
 		return nil, fmt.Errorf("tui: %w", err)
@@ -223,14 +227,18 @@ func pickIssue(ctx context.Context, issues []linear.Issue, out io.Writer) (*line
 }
 
 // programOpts wires output to the given writer and input to /dev/tty when
-// available (so the picker works inside `$( ... )` substitutions).
-func programOpts(ctx context.Context, out io.Writer) []tea.ProgramOption {
+// available (so the picker works inside `$( ... )` substitutions). The
+// returned cleanup closes the /dev/tty file descriptor; callers must defer
+// it. cleanup is non-nil even when /dev/tty couldn't be opened.
+func programOpts(ctx context.Context, out io.Writer) ([]tea.ProgramOption, func()) {
 	opts := []tea.ProgramOption{
 		tea.WithOutput(out),
 		tea.WithContext(ctx),
 	}
+	cleanup := func() {}
 	if tty, err := os.Open("/dev/tty"); err == nil {
 		opts = append(opts, tea.WithInput(tty))
+		cleanup = func() { _ = tty.Close() }
 	}
-	return opts
+	return opts, cleanup
 }
