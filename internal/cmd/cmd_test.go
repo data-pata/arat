@@ -238,13 +238,13 @@ func TestNew_unknownRepo(t *testing.T) {
 }
 
 func TestNew_invalidShortNameFromService(t *testing.T) {
-	svc := &fakeService{newErr: fmt.Errorf("invalid short name %q: ...", "BAD")}
+	svc := &fakeService{newErr: fmt.Errorf("%w: invalid short name %q: ...", workspace.ErrInvalidInput, "BAD")}
 	r := run(t, []string{"new", "BAD", "--no-ticket"}, nil, svc)
 	assert.Equal(t, ExitUsage, r.exit)
 }
 
 func TestNew_invalidTicketFromService(t *testing.T) {
-	svc := &fakeService{newErr: fmt.Errorf("ticket %q does not match pattern", "BAD")}
+	svc := &fakeService{newErr: fmt.Errorf("%w: ticket %q does not match pattern", workspace.ErrInvalidInput, "BAD")}
 	r := run(t, []string{"new", "x", "--ticket", "BAD"}, nil, svc)
 	assert.Equal(t, ExitUsage, r.exit)
 }
@@ -618,7 +618,7 @@ func TestTicketAttach_alreadyTicketed(t *testing.T) {
 }
 
 func TestTicketAttach_badTicket(t *testing.T) {
-	svc := &fakeService{attachErr: errors.New(`ticket "bad" does not match pattern`)}
+	svc := &fakeService{attachErr: fmt.Errorf("%w: ticket %q does not match pattern", workspace.ErrInvalidInput, "bad")}
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "bad"}, nil, svc, depsOpts{})
 	assert.Equal(t, ExitUsage, r.exit)
 }

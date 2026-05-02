@@ -178,9 +178,34 @@ func TestNew_invalidTicket(t *testing.T) {
 	for _, bad := range []string{"BAD!", "not-a-ticket", "abc-", "-99", "ABC-99"} {
 		t.Run(bad, func(t *testing.T) {
 			_, err := svc.New(t.Context(), NewOptions{ShortName: "x" + bad[:1], Ticket: bad, Repos: []string{"repo-a"}})
-			require.Error(t, err)
+			require.ErrorIs(t, err, ErrInvalidInput)
 		})
 	}
+}
+
+func TestNew_invalidShortName_isInvalidInput(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "Bad", Repos: []string{"repo-a"}})
+	require.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestAttachTicket_badTicket_isInvalidInput(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	_, err = svc.AttachTicket(t.Context(), AttachOptions{Name: "x", Ticket: "BAD!"})
+	require.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestAttachTicket_emptyTicket_isInvalidInput(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	_, err = svc.AttachTicket(t.Context(), AttachOptions{Name: "x", Ticket: ""})
+	require.ErrorIs(t, err, ErrInvalidInput)
 }
 
 func TestRemove_clean(t *testing.T) {

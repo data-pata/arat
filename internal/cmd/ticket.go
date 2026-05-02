@@ -72,8 +72,7 @@ func mapAttachError(err error) error {
 		return &exitErr{code: ExitConflict, err: err}
 	case errors.As(err, &pre):
 		return &exitErr{code: ExitPrecondition, err: err}
-	}
-	if strings.Contains(err.Error(), "ticket") || strings.Contains(err.Error(), "match pattern") {
+	case errors.Is(err, workspace.ErrInvalidInput):
 		return &exitErr{code: ExitUsage, err: err}
 	}
 	return &exitErr{code: ExitExternal, err: err}

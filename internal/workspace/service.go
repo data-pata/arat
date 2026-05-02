@@ -109,6 +109,11 @@ var ErrNotFound = errors.New("workspace not found")
 // ErrAlreadyExists means a workspace with the requested name already exists.
 var ErrAlreadyExists = errors.New("workspace already exists")
 
+// ErrInvalidInput marks a caller-supplied value (short name, ticket, etc.)
+// that fails validation. Wrapped via %w so callers can map to ExitUsage with
+// errors.Is rather than string-matching the message.
+var ErrInvalidInput = errors.New("invalid input")
+
 // ErrPrecondition means a safety check failed (dirty / unpushed / stashes).
 type ErrPrecondition struct {
 	Reasons []string

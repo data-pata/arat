@@ -44,10 +44,10 @@ type AttachResult struct {
 // AttachTicket performs the rename/repair/edit. See type docs above.
 func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*AttachResult, error) {
 	if opts.Ticket == "" {
-		return nil, errors.New("ticket is required")
+		return nil, fmt.Errorf("%w: ticket is required", ErrInvalidInput)
 	}
 	if s.TicketRE != nil && !s.TicketRE.MatchString(opts.Ticket) {
-		return nil, fmt.Errorf("ticket %q does not match pattern", opts.Ticket)
+		return nil, fmt.Errorf("%w: ticket %q does not match pattern", ErrInvalidInput, opts.Ticket)
 	}
 
 	current, err := s.Get(ctx, opts.Name)

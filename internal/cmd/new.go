@@ -162,18 +162,10 @@ func mapNewError(err error) error {
 		return &exitErr{code: ExitConflict, err: err}
 	case errors.Is(err, workspace.ErrNotFound):
 		return &exitErr{code: ExitNotFound, err: err}
-	}
-	if isUsageErr(err) {
+	case errors.Is(err, workspace.ErrInvalidInput):
 		return &exitErr{code: ExitUsage, err: err}
 	}
 	return &exitErr{code: ExitExternal, err: err}
-}
-
-// isUsageErr returns true for validation errors that came out of options/inputs.
-func isUsageErr(err error) bool {
-	msg := err.Error()
-	return strings.HasPrefix(msg, "invalid short name") ||
-		strings.HasPrefix(msg, "ticket ")
 }
 
 // isInteractive reports whether arat is running in a terminal where a TUI

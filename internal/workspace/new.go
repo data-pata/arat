@@ -148,11 +148,11 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 
 func (s *Service) validateNew(opts NewOptions) error {
 	if len(opts.ShortName) > shortNameMaxLen || !shortNameRE.MatchString(opts.ShortName) {
-		return fmt.Errorf("invalid short name %q: lowercase letters/digits/hyphens, no leading/trailing or double hyphens, max %d chars", opts.ShortName, shortNameMaxLen)
+		return fmt.Errorf("%w: invalid short name %q: lowercase letters/digits/hyphens, no leading/trailing or double hyphens, max %d chars", ErrInvalidInput, opts.ShortName, shortNameMaxLen)
 	}
 	if opts.Ticket != "" {
 		if s.TicketRE != nil && !s.TicketRE.MatchString(opts.Ticket) {
-			return fmt.Errorf("ticket %q does not match pattern", opts.Ticket)
+			return fmt.Errorf("%w: ticket %q does not match pattern", ErrInvalidInput, opts.Ticket)
 		}
 	}
 	return nil
