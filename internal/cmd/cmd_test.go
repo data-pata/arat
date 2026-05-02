@@ -321,7 +321,7 @@ func TestNew_codeWorkspaceFlag(t *testing.T) {
 func TestNew_interactivePickAttachesTicket(t *testing.T) {
 	svc := &fakeService{newResult: &Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Ticket: "ABC-9"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -333,7 +333,7 @@ func TestNew_interactivePickAttachesTicket(t *testing.T) {
 func TestNew_interactiveSkipped(t *testing.T) {
 	svc := &fakeService{newResult: &Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Skip: true}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -344,7 +344,7 @@ func TestNew_interactiveSkipped(t *testing.T) {
 
 func TestNew_interactiveCancelled(t *testing.T) {
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Cancelled: true}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, &fakeService{}, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -354,7 +354,7 @@ func TestNew_interactiveCancelled(t *testing.T) {
 func TestNew_interactiveHintPrinted(t *testing.T) {
 	svc := &fakeService{newResult: &Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Skip: true, Hint: "run `arat ticket create` first"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -366,7 +366,7 @@ func TestNew_noFlowWhenNotTTY(t *testing.T) {
 	svc := &fakeService{newResult: &Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
 	flowCalled := false
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -380,7 +380,7 @@ func TestNew_noFlowWhenLinearDisabled(t *testing.T) {
 	cfg := &config.Config{Root: "/tmp", BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: false}}
 	svc := &fakeService{newResult: &Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -392,7 +392,7 @@ func TestNew_noFlowWhenLinearDisabled(t *testing.T) {
 func TestNew_explicitNoTicketSkipsFlow(t *testing.T) {
 	svc := &fakeService{newResult: &Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -404,7 +404,7 @@ func TestNew_explicitNoTicketSkipsFlow(t *testing.T) {
 func TestNew_explicitTicketSkipsFlow(t *testing.T) {
 	svc := &fakeService{newResult: &Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ LinearReader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}

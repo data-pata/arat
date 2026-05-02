@@ -52,12 +52,7 @@ type LinearClient interface {
 // TicketFlow is the interactive ticket-attachment flow. Returns either a
 // chosen ticket id (string) or empty (skip). Tests inject a fake; the real
 // impl lives in internal/tui.
-type TicketFlow func(ctx context.Context, lc LinearReader, team string, out io.Writer) (TicketFlowResult, error)
-
-// LinearReader is the read-only Linear surface the ticket flow needs.
-type LinearReader interface {
-	IssueList(ctx context.Context, opts linear.IssueListOptions) ([]linear.Issue, error)
-}
+type TicketFlow func(ctx context.Context, lc linear.Reader, team string, out io.Writer) (TicketFlowResult, error)
 
 // TicketFlowResult: a parallel of tui.TicketFlowResult, but lifted to the
 // cmd package so cmd code doesn't import tui directly.

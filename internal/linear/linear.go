@@ -46,6 +46,13 @@ func (l *Linear) Available(ctx context.Context) bool {
 	return err == nil
 }
 
+// Reader is the read-only Linear surface the interactive ticket flow consumes.
+// Declared in the producer package so multiple consumers (cmd, tui) refer to
+// one type rather than duplicate it.
+type Reader interface {
+	IssueList(ctx context.Context, opts IssueListOptions) ([]Issue, error)
+}
+
 // IssueCreateOptions controls IssueCreate.
 type IssueCreateOptions struct {
 	Title       string   // required

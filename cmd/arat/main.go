@@ -43,7 +43,7 @@ func main() {
 		NewLinear: func() cmd.LinearClient { return linear.New() },
 		Cwd:       os.Getwd,
 		IsTTY:     func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
-		TicketFlow: func(ctx context.Context, lr cmd.LinearReader, team string, out io.Writer) (cmd.TicketFlowResult, error) {
+		TicketFlow: func(ctx context.Context, lr linear.Reader, team string, out io.Writer) (cmd.TicketFlowResult, error) {
 			res, err := tui.PickTicketFlow(ctx, lr, team, out)
 			if err != nil {
 				return cmd.TicketFlowResult{}, err

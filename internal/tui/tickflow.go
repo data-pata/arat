@@ -29,18 +29,13 @@ type TicketFlowResult struct {
 	HintText string // when Action == ActionCreate, a one-line hint to print to stderr
 }
 
-// LinearReader is the read-only Linear surface the flow needs.
-type LinearReader interface {
-	IssueList(ctx context.Context, opts linear.IssueListOptions) ([]linear.Issue, error)
-}
-
 // issuePicker is the type of pickIssue, lifted out for tests.
 type issuePicker func(ctx context.Context, issues []linear.Issue, out io.Writer) (*linear.Issue, error)
 
 // PickTicketFlow runs the full interactive ticket flow. See dispatch for the
 // state-machine; this thin entrypoint wires the real action-chooser and
 // issue picker.
-func PickTicketFlow(ctx context.Context, lc LinearReader, team string, out io.Writer) (TicketFlowResult, error) {
+func PickTicketFlow(ctx context.Context, lc linear.Reader, team string, out io.Writer) (TicketFlowResult, error) {
 	action, err := pickTicketAction(ctx, out)
 	if err != nil {
 		return TicketFlowResult{}, err
@@ -51,7 +46,7 @@ func PickTicketFlow(ctx context.Context, lc LinearReader, team string, out io.Wr
 // dispatchAction is the pure (testable) state-machine that turns a chosen
 // TicketAction into a final result, fetching issues and consulting the
 // issue picker as needed.
-func dispatchAction(ctx context.Context, action TicketAction, lc LinearReader, team string, pick issuePicker, out io.Writer) (TicketFlowResult, error) {
+func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, team string, pick issuePicker, out io.Writer) (TicketFlowResult, error) {
 	switch action {
 	case ActionCancelled, ActionSkip:
 		return TicketFlowResult{Action: action}, nil
