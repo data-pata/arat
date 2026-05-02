@@ -19,20 +19,23 @@ import (
 
 // fakeService implements cmd.Service for handler-level tests.
 type fakeService struct {
-	listResult   []Workspace
-	listErr      error
-	getResult    *Workspace
-	getErr       error
-	newResult    *Workspace
-	newErr       error
-	removeErr    error
-	attachResult *workspace.AttachResult
-	attachErr    error
+	listResult     []Workspace
+	listErr        error
+	getResult      *Workspace
+	getErr         error
+	newResult      *Workspace
+	newErr         error
+	removeErr      error
+	attachResult   *workspace.AttachResult
+	attachErr      error
+	addReposResult *workspace.AddReposResult
+	addReposErr    error
 
-	getCalls    []string
-	newCalls    []workspace.NewOptions
-	removeCalls []workspace.RemoveOptions
-	attachCalls []workspace.AttachOptions
+	getCalls      []string
+	newCalls      []workspace.NewOptions
+	removeCalls   []workspace.RemoveOptions
+	attachCalls   []workspace.AttachOptions
+	addReposCalls []workspace.AddReposOptions
 }
 
 func (f *fakeService) List(_ context.Context) ([]Workspace, error) {
@@ -53,6 +56,10 @@ func (f *fakeService) Remove(_ context.Context, opts workspace.RemoveOptions) er
 func (f *fakeService) AttachTicket(_ context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error) {
 	f.attachCalls = append(f.attachCalls, opts)
 	return f.attachResult, f.attachErr
+}
+func (f *fakeService) AddRepos(_ context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error) {
+	f.addReposCalls = append(f.addReposCalls, opts)
+	return f.addReposResult, f.addReposErr
 }
 
 type runResult struct {
@@ -614,6 +621,107 @@ func TestTicketAttach_badTicket(t *testing.T) {
 	svc := &fakeService{attachErr: errors.New(`ticket "bad" does not match pattern`)}
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "bad"}, nil, svc, depsOpts{})
 	assert.Equal(t, ExitUsage, r.exit)
+}
+
+// --- repo add --------------------------------------------------------
+
+func TestRepoAdd_explicitWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	wsDir := filepath.Join(dir, "feat")
+	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "abc-1--x"), 0o755))
+	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
+
+	svc := &fakeService{addReposResult: &workspace.AddReposResult{
+		Workspace: &Workspace{Name: "abc-1--x", Path: filepath.Join(wsDir, "abc-1--x")},
+		Added: []RepoStatus{
+			{Name: "repo-b", Path: filepath.Join(wsDir, "abc-1--x", "repo-b"), Branch: "ps--x--abc-1"},
+		},
+	}}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "abc-1--x", "repo-b"}, cfg, svc, depsOpts{cwd: failingCwd(t)})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.addReposCalls, 1)
+	assert.Equal(t, "abc-1--x", svc.addReposCalls[0].Workspace)
+	assert.Equal(t, []string{"repo-b"}, svc.addReposCalls[0].Repos)
+	assert.Contains(t, r.stdout, filepath.Join(wsDir, "abc-1--x", "repo-b"))
+	assert.Contains(t, r.stderr, "added 1 repo(s) to abc-1--x")
+}
+
+func TestRepoAdd_inferFromCwd(t *testing.T) {
+	dir := t.TempDir()
+	wsDir := filepath.Join(dir, "feat")
+	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "myws", "repo-a"), 0o755))
+	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
+
+	svc := &fakeService{addReposResult: &workspace.AddReposResult{
+		Workspace: &Workspace{Name: "myws"},
+		Added:     []RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--myws"}},
+	}}
+	cwdFn := func() (string, error) { return filepath.Join(wsDir, "myws", "repo-a"), nil }
+	r := runWithDeps(t, []string{"repo", "add", "repo-b"}, cfg, svc, depsOpts{cwd: cwdFn})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.addReposCalls, 1)
+	assert.Equal(t, "myws", svc.addReposCalls[0].Workspace)
+}
+
+func TestRepoAdd_multipleRepos(t *testing.T) {
+	svc := &fakeService{addReposResult: &workspace.AddReposResult{
+		Workspace: &Workspace{Name: "x"},
+		Added: []RepoStatus{
+			{Name: "repo-b", Path: "/x/repo-b", Branch: "ps--x"},
+			{Name: "repo-c", Path: "/x/repo-c", Branch: "ps--x"},
+		},
+	}}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "repo-b", "repo-c"}, nil, svc, depsOpts{cwd: failingCwd(t)})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.addReposCalls, 1)
+	assert.Equal(t, []string{"repo-b", "repo-c"}, svc.addReposCalls[0].Repos)
+}
+
+func TestRepoAdd_baseFlag(t *testing.T) {
+	svc := &fakeService{addReposResult: &workspace.AddReposResult{
+		Workspace: &Workspace{Name: "x"},
+		Added:     []RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--x"}},
+	}}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "--base", "origin/main", "repo-b"}, nil, svc, depsOpts{cwd: failingCwd(t)})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.addReposCalls, 1)
+	assert.Equal(t, "origin/main", svc.addReposCalls[0].Base)
+}
+
+func TestRepoAdd_workspaceNotFound(t *testing.T) {
+	svc := &fakeService{addReposErr: fmt.Errorf("%w: gone", workspace.ErrNotFound)}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "gone", "repo-b"}, nil, svc, depsOpts{cwd: failingCwd(t)})
+	assert.Equal(t, ExitNotFound, r.exit)
+}
+
+func TestRepoAdd_alreadyExists(t *testing.T) {
+	svc := &fakeService{addReposErr: fmt.Errorf("%w: dup", workspace.ErrAlreadyExists)}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "repo-b"}, nil, svc, depsOpts{cwd: failingCwd(t)})
+	assert.Equal(t, ExitConflict, r.exit)
+}
+
+func TestRepoAdd_singleRepoLayoutRejected(t *testing.T) {
+	svc := &fakeService{addReposErr: &workspace.ErrPrecondition{Reasons: []string{"workspace x is a single-repo layout"}}}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "repo-b"}, nil, svc, depsOpts{cwd: failingCwd(t)})
+	assert.Equal(t, ExitPrecondition, r.exit)
+	assert.Contains(t, r.stderr, "single-repo layout")
+}
+
+func TestRepoAdd_outsideWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	wsDir := filepath.Join(dir, "feat")
+	require.NoError(t, os.MkdirAll(wsDir, 0o755))
+	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
+
+	cwdFn := func() (string, error) { return "/tmp/elsewhere", nil }
+	r := runWithDeps(t, []string{"repo", "add", "repo-b"}, cfg, &fakeService{}, depsOpts{cwd: cwdFn})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "not inside a workspace")
+}
+
+func TestRepoAdd_argRequired(t *testing.T) {
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x"}, nil, nil, depsOpts{cwd: failingCwd(t)})
+	assert.NotEqual(t, 0, r.exit)
 }
 
 // --- ticket create ---------------------------------------------------

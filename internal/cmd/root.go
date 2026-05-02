@@ -75,6 +75,7 @@ type Service interface {
 	New(ctx context.Context, opts workspace.NewOptions) (*Workspace, error)
 	Remove(ctx context.Context, opts workspace.RemoveOptions) error
 	AttachTicket(ctx context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error)
+	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
 }
 
 // Workspace is a renamed alias to break the import cycle —
@@ -127,6 +128,7 @@ Exit codes:
 		newInitCmd(state),
 		newTicketCmd(state),
 		newNoteCmd(state),
+		newRepoCmd(state),
 		newConfigCmd(state),
 		newVersionCmd(state),
 	)

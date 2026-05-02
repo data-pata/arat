@@ -22,8 +22,8 @@ many-repos-in-a-parent-directory layout.
 ## Status
 
 Working: `ls`, `new`, `rm`, `go` (with picker), `init`, `ticket
-create|attach`, `note`, `config init|path`, `version`. Targeted unit + real-
-git integration coverage at ~82% overall.
+create|attach`, `repo add`, `note`, `config init|path`, `version`. Targeted
+unit + real-git integration coverage at ~82% overall.
 
 ## Install
 
@@ -84,6 +84,7 @@ default_team  = "ABC"
 | `arat go [name]` | Print path to a workspace. With shell wrapper, `cd`s into it. No name → interactive picker. |
 | `arat ticket create -t <title> [--team] [--project] [--state] [-d desc] [-l label]` | Create a Linear issue via `linear issue create --no-interactive`. |
 | `arat ticket attach <name> <ticket>` | Attach a ticket to a ticketless workspace; renames dirs/branches and updates CLAUDE.md. |
+| `arat repo add [--workspace NAME] [--base REF] <repo>...` | Add one or more git worktrees to an existing multi-repo workspace, on its existing feature branch. Workspace inferred from cwd if `--workspace` omitted. |
 | `arat note [name] <text...>` | Post a comment on the workspace's Linear ticket. Workspace inferred from cwd if name omitted. |
 | `arat init <bash\|zsh\|fish>` | Print shell integration. |
 | `arat config init [--force] / path` | Write / resolve the config file. |

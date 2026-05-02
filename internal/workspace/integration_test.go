@@ -581,3 +581,141 @@ func assertFileContains(t *testing.T, path, want string) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), want)
 }
+
+// --- AddRepos --------------------------------------------------------
+
+func TestAddRepos_happy(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b", "repo-c")
+	svc := newSvc(t, root)
+
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "feat", Ticket: "abc-1", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	res, err := svc.AddRepos(t.Context(), AddReposOptions{
+		Workspace: "abc-1--feat",
+		Repos:     []string{"repo-b", "repo-c"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, res.Added, 2)
+	for _, r := range res.Added {
+		assert.Equal(t, "ps--feat--abc-1", r.Branch)
+		assert.True(t, dirExists(r.Path))
+	}
+
+	// Workspace now reports all three repos.
+	require.Len(t, res.Workspace.Repos, 3)
+
+	// Branch was created in each newly-added canonical repo.
+	for _, repo := range []string{"repo-b", "repo-c"} {
+		out, err := exec.Command("git", "-C", filepath.Join(root, repo), "branch", "--list", "ps--feat--abc-1").CombinedOutput()
+		require.NoError(t, err)
+		assert.Contains(t, string(out), "ps--feat--abc-1", "branch missing in %s", repo)
+	}
+}
+
+func TestAddRepos_derivesBranchFromExistingWorktree(t *testing.T) {
+	// After `ticket attach`, branches are renamed. AddRepos must use the
+	// renamed branch (read off the existing worktree), not BranchName().
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "feat", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	_, err = svc.AttachTicket(t.Context(), AttachOptions{Name: "feat", Ticket: "abc-7"})
+	require.NoError(t, err)
+
+	res, err := svc.AddRepos(t.Context(), AddReposOptions{
+		Workspace: "abc-7--feat",
+		Repos:     []string{"repo-b"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ps--feat--abc-7", res.Added[0].Branch)
+}
+
+func TestAddRepos_regeneratesCodeWorkspace(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	svc.GenerateCodeWorkspace = true
+
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	cwPath := filepath.Join(svc.WorkspacesDir, "x", "x.code-workspace")
+	require.FileExists(t, cwPath)
+
+	_, err = svc.AddRepos(t.Context(), AddReposOptions{Workspace: "x", Repos: []string{"repo-b"}})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(cwPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"path": "./repo-a"`)
+	assert.Contains(t, string(data), `"path": "./repo-b"`)
+}
+
+func TestAddRepos_codeWorkspaceNotCreatedIfAbsent(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root) // GenerateCodeWorkspace=false
+
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	_, err = svc.AddRepos(t.Context(), AddReposOptions{Workspace: "x", Repos: []string{"repo-b"}})
+	require.NoError(t, err)
+
+	cwPath := filepath.Join(svc.WorkspacesDir, "x", "x.code-workspace")
+	_, statErr := os.Stat(cwPath)
+	assert.True(t, os.IsNotExist(statErr), "code-workspace must not be created here")
+}
+
+func TestAddRepos_workspaceNotFound(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	require.NoError(t, os.MkdirAll(svc.WorkspacesDir, 0o755))
+
+	_, err := svc.AddRepos(t.Context(), AddReposOptions{Workspace: "missing", Repos: []string{"repo-a"}})
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestAddRepos_repoNotAtRoot(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	_, err = svc.AddRepos(t.Context(), AddReposOptions{Workspace: "x", Repos: []string{"missing"}})
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestAddRepos_alreadyInWorkspace(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a", "repo-b"}})
+	require.NoError(t, err)
+
+	_, err = svc.AddRepos(t.Context(), AddReposOptions{Workspace: "x", Repos: []string{"repo-b"}})
+	require.ErrorIs(t, err, ErrAlreadyExists)
+}
+
+func TestAddRepos_subdirCollides(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	ws, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	// Plant a non-worktree directory where repo-b would land.
+	require.NoError(t, os.MkdirAll(filepath.Join(ws.Path, "repo-b"), 0o755))
+
+	_, err = svc.AddRepos(t.Context(), AddReposOptions{Workspace: "x", Repos: []string{"repo-b"}})
+	require.ErrorIs(t, err, ErrAlreadyExists)
+}
+
+func TestAddRepos_noReposGiven(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	_, err = svc.AddRepos(t.Context(), AddReposOptions{Workspace: "x"})
+	require.Error(t, err)
+}
