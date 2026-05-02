@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -109,7 +108,12 @@ func (s *Service) List(ctx context.Context) ([]Workspace, error) {
 		if !e.IsDir() {
 			continue
 		}
-		ws, err := s.hydrate(ctx, e)
+		info, err := e.Info()
+		var modTime time.Time
+		if err == nil {
+			modTime = info.ModTime()
+		}
+		ws, err := s.hydrate(ctx, e.Name(), modTime)
 		if err != nil {
 			return nil, err
 		}
@@ -133,7 +137,7 @@ func (s *Service) Get(ctx context.Context, name string) (*Workspace, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%w: %s is not a directory", ErrNotFound, name)
 	}
-	ws, err := s.hydrate(ctx, fakeDirEntry{info})
+	ws, err := s.hydrate(ctx, name, info.ModTime())
 	if err != nil {
 		return nil, err
 	}
@@ -163,22 +167,18 @@ func (e *ErrPrecondition) Error() string {
 	return "precondition failed:\n  " + strings.Join(e.Reasons, "\n  ")
 }
 
-func (s *Service) hydrate(ctx context.Context, e fs.DirEntry) (Workspace, error) {
-	full := filepath.Join(s.WorkspacesDir, e.Name())
-	ticket, short := ParseName(e.Name(), s.TicketRE)
+func (s *Service) hydrate(ctx context.Context, name string, created time.Time) (Workspace, error) {
+	full := filepath.Join(s.WorkspacesDir, name)
+	ticket, short := ParseName(name, s.TicketRE)
 	ws := Workspace{
-		Name:      e.Name(),
+		Name:      name,
 		Path:      full,
 		Ticket:    ticket,
 		ShortName: short,
+		Created:   created,
 	}
 	if ticket != "" && s.TicketURL != "" {
 		ws.TicketURL = renderTicketURL(s.TicketURL, ticket)
-	}
-	if info, err := e.Info(); err == nil {
-		ws.Created = info.ModTime()
-	} else {
-		ws.Created = time.Time{}
 	}
 
 	// Single-repo workspace: the workspace dir itself is a git worktree.
@@ -232,11 +232,3 @@ func renderTicketURL(tmpl, ticket string) string {
 	return r.Replace(tmpl)
 }
 
-// fakeDirEntry adapts an os.FileInfo to fs.DirEntry. Used by Get(), which has
-// the FileInfo from os.Stat but the hydrate() helper takes a DirEntry.
-type fakeDirEntry struct{ fi os.FileInfo }
-
-func (f fakeDirEntry) Name() string               { return f.fi.Name() }
-func (f fakeDirEntry) IsDir() bool                { return f.fi.IsDir() }
-func (f fakeDirEntry) Type() fs.FileMode          { return f.fi.Mode().Type() }
-func (f fakeDirEntry) Info() (os.FileInfo, error) { return f.fi, nil }

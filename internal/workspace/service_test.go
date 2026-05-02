@@ -69,12 +69,12 @@ func TestService_List(t *testing.T) {
 	insp := &fakeInspector{
 		worktrees: map[string]bool{
 			filepath.Join(wa, "core-app"): true,
-			filepath.Join(wa, "ui-app"):        true,
+			filepath.Join(wa, "ui-app"):   true,
 			filepath.Join(wb, "core-app"): true,
 		},
 		insp: map[string]git.Inspection{
 			filepath.Join(wa, "core-app"): {Branch: "ps--foo--abc-1", Dirty: true},
-			filepath.Join(wa, "ui-app"):        {Branch: "ps--foo--abc-1", Unpushed: true, Stashes: 2},
+			filepath.Join(wa, "ui-app"):   {Branch: "ps--foo--abc-1", Unpushed: true, Stashes: 2},
 			filepath.Join(wb, "core-app"): {Branch: "ps--bar"},
 		},
 	}
@@ -82,7 +82,7 @@ func TestService_List(t *testing.T) {
 		WorkspacesDir: wsDir,
 		TicketRE:      regexp.MustCompile(`^[a-z]+-[0-9]+$`),
 		TicketURL:     "https://linear.app/x/issue/{TICKET_UPPER}",
-		Git: insp,
+		Git:           insp,
 	}
 
 	got, err := svc.List(t.Context())
@@ -138,7 +138,7 @@ func TestService_List_singleRepoWorkspace(t *testing.T) {
 	svc := &Service{
 		WorkspacesDir: wsDir,
 		TicketRE:      regexp.MustCompile(`^[a-z]+-[0-9]+$`),
-		Git: insp,
+		Git:           insp,
 	}
 	got, err := svc.List(t.Context())
 	require.NoError(t, err)
@@ -164,15 +164,15 @@ func TestService_List_missingDir(t *testing.T) {
 func TestParseName(t *testing.T) {
 	re := regexp.MustCompile(`^[a-z]+-[0-9]+$`)
 	tests := []struct {
-		in           string
-		wantTicket   string
-		wantShort    string
+		in         string
+		wantTicket string
+		wantShort  string
 	}{
 		{"foo", "", "foo"},
 		{"abc-1--foo", "abc-1", "foo"},
 		{"ABC-1--foo", "abc-1", "foo"}, // ticket lowercased
 		{"foo--bar", "", "foo--bar"},   // left side doesn't match regex; whole name is short
-		{"--foo", "", "--foo"},          // leading "--" yields empty left → keep whole name
+		{"--foo", "", "--foo"},         // leading "--" yields empty left → keep whole name
 		{"abc-1--foo--bar", "abc-1", "foo--bar"},
 	}
 	for _, tt := range tests {

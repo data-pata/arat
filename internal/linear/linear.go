@@ -126,10 +126,10 @@ func (l *Linear) IssueCreate(ctx context.Context, opts IssueCreateOptions) (Issu
 
 // Issue is a Linear issue summary as returned by IssueList.
 type Issue struct {
-	ID      string `json:"id"`      // identifier, e.g. "ABC-123"
-	Title   string `json:"title"`
-	State   string `json:"state"`   // workflow state name
-	URL     string `json:"url"`
+	ID    string `json:"id"` // identifier, e.g. "ABC-123"
+	Title string `json:"title"`
+	State string `json:"state"` // workflow state name
+	URL   string `json:"url"`
 }
 
 // IssueListOptions controls IssueList.

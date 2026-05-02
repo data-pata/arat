@@ -29,14 +29,15 @@ Convention: packages declare their deps as interfaces, composition lives in
 
 ## Build phases
 
-1. skeleton + config + `ls`                   ← current
-2. `new` (non-interactive) + `rm`
-3. shell integration + `go` (no TUI)
-4. TUI: workspace picker
-5. Linear: `ticket create` + `note`
-6. interactive ticket flow in `new` + `ticket attach`
-7. extras (`--from-current`, `--carry-context`, `--code-workspace`, `auto_repos_glob`)
-8. migrate `~/.claude/skills/ws-*` to call `arat`
+1. ✓ skeleton + config + `ls`
+2. ✓ `new` (non-interactive) + `rm`
+3. ✓ shell integration + `go` (no TUI)
+4. ✓ TUI: workspace picker
+5. ✓ Linear: `ticket create` + `note`
+6. ✓ interactive ticket flow in `new` + `ticket attach`
+7. ✓ extras (`--from-current`, `--carry-context`, `--code-workspace`, `auto_repos_glob`)
+8. ✓ `repo add` (attach more worktrees to an existing workspace)
+9. migrate `~/.claude/skills/ws-*` to call `arat`         ← current
 
 ## Conventions
 

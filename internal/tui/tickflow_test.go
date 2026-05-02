@@ -192,4 +192,3 @@ func TestIssueModel_view(t *testing.T) {
 	m.chosen = &chosen
 	assert.Empty(t, m.View())
 }
-

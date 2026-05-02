@@ -80,11 +80,11 @@ func runWithPicker(t *testing.T, args []string, cfg *config.Config, svc *fakeSer
 }
 
 type depsOpts struct {
-	picker     func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error)
-	linear     *fakeLinear
-	cwd        func() (string, error)
-	tickFlow   TicketFlow
-	isTTY      func() bool
+	picker   func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error)
+	linear   *fakeLinear
+	cwd      func() (string, error)
+	tickFlow TicketFlow
+	isTTY    func() bool
 }
 
 func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeService, opts depsOpts) runResult {

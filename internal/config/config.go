@@ -14,16 +14,16 @@ import (
 
 // Config is the resolved, validated configuration.
 type Config struct {
-	Root                  string         `toml:"root"`
-	WorkspacesDir         string         `toml:"workspaces_dir"`
-	BranchPrefix          string         `toml:"branch_prefix"`
-	TicketPattern         string         `toml:"ticket_pattern"`
-	TicketURL             string         `toml:"ticket_url"`
-	DefaultRepos          []string       `toml:"default_repos"`
-	AutoReposGlob         []string       `toml:"auto_repos_glob"`
-	GenerateCodeWorkspace bool           `toml:"generate_code_workspace"`
-	Linear                LinearConfig   `toml:"linear"`
-	TUI                   TUIConfig      `toml:"tui"`
+	Root                  string       `toml:"root"`
+	WorkspacesDir         string       `toml:"workspaces_dir"`
+	BranchPrefix          string       `toml:"branch_prefix"`
+	TicketPattern         string       `toml:"ticket_pattern"`
+	TicketURL             string       `toml:"ticket_url"`
+	DefaultRepos          []string     `toml:"default_repos"`
+	AutoReposGlob         []string     `toml:"auto_repos_glob"`
+	GenerateCodeWorkspace bool         `toml:"generate_code_workspace"`
+	Linear                LinearConfig `toml:"linear"`
+	TUI                   TUIConfig    `toml:"tui"`
 
 	// Path is the file the config was loaded from. Empty if defaults-only.
 	Path string `toml:"-"`

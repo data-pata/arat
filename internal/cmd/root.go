@@ -88,7 +88,7 @@ func Root(d Deps) *cobra.Command {
 Each workspace is a directory holding git worktrees of one or more repos plus
 a CLAUDE.md and claude_workspace/ scratch dir.
 
-Commands accept --json where structured output is useful (ls, go --print).
+Commands accept --json where structured output is useful (ls, new, ticket create).
 Stderr is for operational messages; stdout is for results / JSON.
 
 Exit codes:

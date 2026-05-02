@@ -80,12 +80,12 @@ func mapAttachError(err error) error {
 
 func newTicketCreateCmd(s *state) *cobra.Command {
 	var (
-		title       string
-		description string
-		team        string
-		project     string
-		workflowState      string
-		labels      []string
+		title         string
+		description   string
+		team          string
+		project       string
+		workflowState string
+		labels        []string
 	)
 	c := &cobra.Command{
 		Use:   "create",

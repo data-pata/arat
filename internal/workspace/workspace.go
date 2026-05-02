@@ -22,7 +22,7 @@ type Workspace struct {
 type RepoStatus struct {
 	Name     string `json:"name"`
 	Path     string `json:"path"`
-	Branch   string `json:"branch"`   // "" if detached
+	Branch   string `json:"branch"` // "" if detached
 	Dirty    bool   `json:"dirty"`
 	Unpushed bool   `json:"unpushed"`
 	Stashes  int    `json:"stashes"`
