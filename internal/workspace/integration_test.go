@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,46 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// gitAdapter mirrors cmd/arat/main.go's adapter — local for tests so we can
-// drive Service against a real git CLI.
-type gitAdapter struct{ g *git.Git }
-
-func (a gitAdapter) IsWorktree(ctx context.Context, dir string) bool { return a.g.IsWorktree(ctx, dir) }
-func (a gitAdapter) CanonicalRepoName(ctx context.Context, dir string) string {
-	return a.g.CanonicalRepoName(ctx, dir)
-}
-func (a gitAdapter) CanonicalRepoPath(ctx context.Context, dir string) string {
-	return a.g.CanonicalRepoPath(ctx, dir)
-}
-func (a gitAdapter) Inspect(ctx context.Context, dir string) (Inspection, error) {
-	in, err := a.g.Inspect(ctx, dir)
-	if err != nil {
-		return Inspection{}, err
-	}
-	return Inspection{
-		Branch:   in.Branch,
-		Dirty:    in.Dirty,
-		Unpushed: in.Unpushed,
-		Stashes:  in.Stashes,
-	}, nil
-}
-func (a gitAdapter) Fetch(ctx context.Context, dir string) error { return a.g.Fetch(ctx, dir) }
-func (a gitAdapter) WorktreeAdd(ctx context.Context, repoDir, branch, target, base string) error {
-	return a.g.WorktreeAdd(ctx, repoDir, branch, target, base)
-}
-func (a gitAdapter) WorktreeRemove(ctx context.Context, repoDir, target string, force bool) error {
-	return a.g.WorktreeRemove(ctx, repoDir, target, force)
-}
-func (a gitAdapter) BranchDelete(ctx context.Context, repoDir, branch string, force bool) error {
-	return a.g.BranchDelete(ctx, repoDir, branch, force)
-}
-func (a gitAdapter) BranchRename(ctx context.Context, repoDir, from, to string) error {
-	return a.g.BranchRename(ctx, repoDir, from, to)
-}
-func (a gitAdapter) WorktreeRepair(ctx context.Context, repoDir string) error {
-	return a.g.WorktreeRepair(ctx, repoDir)
-}
 
 // setupRoot creates a temp "root" with N canonical repos (each with a single
 // commit on `main`). Returns the root path. Tests use Base="HEAD" so no origin
@@ -88,18 +47,18 @@ func runGit(t *testing.T, dir string, args ...string) {
 
 func newSvc(t *testing.T, root string) *Service {
 	t.Helper()
-	return &Service{
+	svc, err := NewService(ServiceOptions{
 		Root:          root,
 		WorkspacesDir: filepath.Join(root, "feat"),
 		BranchPrefix:  "ps",
 		TicketRE:      regexp.MustCompile(`^[a-z]+-[0-9]+$`),
 		TicketURL:     "https://linear.app/x/issue/{TICKET_UPPER}",
-		DefaultRepos:  nil, // tests pass explicit repos
-		AutoReposGlob: nil,
 		Base:          "HEAD",
 		Now:           func() time.Time { return time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC) },
-		Git:           gitAdapter{g: git.New()},
-	}
+		Git:           git.New(),
+	})
+	require.NoError(t, err)
+	return svc
 }
 
 func TestNew_withTicket(t *testing.T) {

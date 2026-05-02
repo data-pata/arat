@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/data-pata/arat/internal/git"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -16,16 +17,16 @@ import (
 // (read-only). New/Remove tests use real git in t.TempDir() instead.
 type fakeInspector struct {
 	worktrees map[string]bool
-	insp      map[string]Inspection
+	insp      map[string]git.Inspection
 	canonical map[string]string
 }
 
 func (f *fakeInspector) IsWorktree(_ context.Context, dir string) bool { return f.worktrees[dir] }
-func (f *fakeInspector) Inspect(_ context.Context, dir string) (Inspection, error) {
+func (f *fakeInspector) Inspect(_ context.Context, dir string) (git.Inspection, error) {
 	if i, ok := f.insp[dir]; ok {
 		return i, nil
 	}
-	return Inspection{}, nil
+	return git.Inspection{}, nil
 }
 func (f *fakeInspector) CanonicalRepoName(_ context.Context, dir string) string {
 	return f.canonical[dir]
@@ -71,7 +72,7 @@ func TestService_List(t *testing.T) {
 			filepath.Join(wa, "ui-app"):        true,
 			filepath.Join(wb, "core-app"): true,
 		},
-		insp: map[string]Inspection{
+		insp: map[string]git.Inspection{
 			filepath.Join(wa, "core-app"): {Branch: "ps--foo--abc-1", Dirty: true},
 			filepath.Join(wa, "ui-app"):        {Branch: "ps--foo--abc-1", Unpushed: true, Stashes: 2},
 			filepath.Join(wb, "core-app"): {Branch: "ps--bar"},
@@ -127,7 +128,7 @@ func TestService_List_singleRepoWorkspace(t *testing.T) {
 			wa: true, // workspace dir itself is a worktree
 			// build/docs intentionally NOT marked as worktrees
 		},
-		insp: map[string]Inspection{
+		insp: map[string]git.Inspection{
 			wa: {Branch: "ps--selfwt", Dirty: true, Stashes: 5},
 		},
 		canonical: map[string]string{

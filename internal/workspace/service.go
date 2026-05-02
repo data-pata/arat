@@ -11,11 +11,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/data-pata/arat/internal/git"
 )
 
 // Git is what Service needs from `internal/git`.
 type Git interface {
-	Inspect(ctx context.Context, dir string) (Inspection, error)
+	Inspect(ctx context.Context, dir string) (git.Inspection, error)
 	IsWorktree(ctx context.Context, dir string) bool
 	CanonicalRepoName(ctx context.Context, dir string) string
 	CanonicalRepoPath(ctx context.Context, dir string) string
@@ -27,15 +29,10 @@ type Git interface {
 	WorktreeRepair(ctx context.Context, repoDir string) error
 }
 
-// Inspection mirrors git.Inspection so this package doesn't import internal/git.
-type Inspection struct {
-	Branch   string
-	Dirty    bool
-	Unpushed bool
-	Stashes  int
-}
-
 // Service is the workspace-domain entry point used by command handlers.
+//
+// Use NewService to construct one — the zero value is not usable because
+// Git is required.
 type Service struct {
 	Root                  string
 	WorkspacesDir         string
@@ -44,10 +41,53 @@ type Service struct {
 	TicketURL             string // template; {TICKET}/{TICKET_UPPER}
 	DefaultRepos          []string
 	AutoReposGlob         []string
-	Base                  string             // ref to branch from on `New`; default "origin/HEAD"
-	GenerateCodeWorkspace bool               // mirrors config.generate_code_workspace
-	Now                   func() time.Time   // injected for deterministic CLAUDE.md timestamps
+	Base                  string           // ref to branch from on `New`; default "origin/HEAD"
+	GenerateCodeWorkspace bool             // mirrors config.generate_code_workspace
+	Now                   func() time.Time // injected for deterministic CLAUDE.md timestamps
 	Git                   Git
+}
+
+// ServiceOptions are the inputs to NewService. Mandatory: Root, WorkspacesDir,
+// Git. Everything else has sensible zero-value behaviour.
+type ServiceOptions struct {
+	Root                  string
+	WorkspacesDir         string
+	BranchPrefix          string
+	TicketRE              *regexp.Regexp
+	TicketURL             string
+	DefaultRepos          []string
+	AutoReposGlob         []string
+	Base                  string
+	GenerateCodeWorkspace bool
+	Now                   func() time.Time
+	Git                   Git
+}
+
+// NewService constructs a Service. Returns an error if a mandatory dep
+// (Root, WorkspacesDir, Git) is missing.
+func NewService(opts ServiceOptions) (*Service, error) {
+	if opts.Root == "" {
+		return nil, errors.New("workspace: Root is required")
+	}
+	if opts.WorkspacesDir == "" {
+		return nil, errors.New("workspace: WorkspacesDir is required")
+	}
+	if opts.Git == nil {
+		return nil, errors.New("workspace: Git is required")
+	}
+	return &Service{
+		Root:                  opts.Root,
+		WorkspacesDir:         opts.WorkspacesDir,
+		BranchPrefix:          opts.BranchPrefix,
+		TicketRE:              opts.TicketRE,
+		TicketURL:             opts.TicketURL,
+		DefaultRepos:          opts.DefaultRepos,
+		AutoReposGlob:         opts.AutoReposGlob,
+		Base:                  opts.Base,
+		GenerateCodeWorkspace: opts.GenerateCodeWorkspace,
+		Now:                   opts.Now,
+		Git:                   opts.Git,
+	}, nil
 }
 
 // List enumerates workspaces under WorkspacesDir, sorted by name.

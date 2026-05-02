@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 
@@ -21,7 +22,7 @@ func main() {
 		Stderr:    os.Stderr,
 		NewConfig: config.Load,
 		NewService: func(cfg *config.Config) cmd.Service {
-			return &workspace.Service{
+			svc, err := workspace.NewService(workspace.ServiceOptions{
 				Root:                  cfg.Root,
 				WorkspacesDir:         cfg.WorkspacesDir,
 				BranchPrefix:          cfg.BranchPrefix,
@@ -30,8 +31,13 @@ func main() {
 				DefaultRepos:          cfg.DefaultRepos,
 				AutoReposGlob:         cfg.AutoReposGlob,
 				GenerateCodeWorkspace: cfg.GenerateCodeWorkspace,
-				Git:                   gitAdapter{g: git.New()},
+				Git:                   git.New(),
+			})
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "arat: %v\n", err)
+				os.Exit(cmd.ExitConfig)
 			}
+			return svc
 		},
 		PickWorkspace: func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error) {
 			ws, err := tui.PickWorkspace(ctx, items, out)
@@ -63,57 +69,4 @@ func main() {
 		},
 	}
 	os.Exit(cmd.Execute(deps, os.Args[1:]))
-}
-
-// gitAdapter bridges *git.Git to workspace.Git. The workspace package declares
-// its own Inspection type so it doesn't import internal/git.
-type gitAdapter struct{ g *git.Git }
-
-func (a gitAdapter) IsWorktree(ctx context.Context, dir string) bool {
-	return a.g.IsWorktree(ctx, dir)
-}
-
-func (a gitAdapter) CanonicalRepoName(ctx context.Context, dir string) string {
-	return a.g.CanonicalRepoName(ctx, dir)
-}
-
-func (a gitAdapter) CanonicalRepoPath(ctx context.Context, dir string) string {
-	return a.g.CanonicalRepoPath(ctx, dir)
-}
-
-func (a gitAdapter) Inspect(ctx context.Context, dir string) (workspace.Inspection, error) {
-	in, err := a.g.Inspect(ctx, dir)
-	if err != nil {
-		return workspace.Inspection{}, err
-	}
-	return workspace.Inspection{
-		Branch:   in.Branch,
-		Dirty:    in.Dirty,
-		Unpushed: in.Unpushed,
-		Stashes:  in.Stashes,
-	}, nil
-}
-
-func (a gitAdapter) Fetch(ctx context.Context, repoDir string) error {
-	return a.g.Fetch(ctx, repoDir)
-}
-
-func (a gitAdapter) WorktreeAdd(ctx context.Context, repoDir, branch, target, base string) error {
-	return a.g.WorktreeAdd(ctx, repoDir, branch, target, base)
-}
-
-func (a gitAdapter) WorktreeRemove(ctx context.Context, repoDir, target string, force bool) error {
-	return a.g.WorktreeRemove(ctx, repoDir, target, force)
-}
-
-func (a gitAdapter) BranchDelete(ctx context.Context, repoDir, branch string, force bool) error {
-	return a.g.BranchDelete(ctx, repoDir, branch, force)
-}
-
-func (a gitAdapter) BranchRename(ctx context.Context, repoDir, from, to string) error {
-	return a.g.BranchRename(ctx, repoDir, from, to)
-}
-
-func (a gitAdapter) WorktreeRepair(ctx context.Context, repoDir string) error {
-	return a.g.WorktreeRepair(ctx, repoDir)
 }
