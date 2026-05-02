@@ -84,7 +84,7 @@ func newTicketCreateCmd(s *state) *cobra.Command {
 		description string
 		team        string
 		project     string
-		state_      string
+		workflowState      string
 		labels      []string
 	)
 	c := &cobra.Command{
@@ -125,8 +125,8 @@ piping into ` + "`arat new`" + `.
 			if team == "" {
 				team = cfg.Linear.DefaultTeam
 			}
-			if state_ == "" {
-				state_ = "Backlog"
+			if workflowState == "" {
+				workflowState = "Backlog"
 			}
 
 			res, err := lc.IssueCreate(cmd.Context(), linear.IssueCreateOptions{
@@ -134,7 +134,7 @@ piping into ` + "`arat new`" + `.
 				Description: description,
 				Team:        team,
 				Project:     project,
-				State:       state_,
+				State:       workflowState,
 				Labels:      labels,
 			})
 			if err != nil {
@@ -159,7 +159,7 @@ piping into ` + "`arat new`" + `.
 	c.Flags().StringVarP(&description, "description", "d", "", "issue description (multi-line written via --description-file)")
 	c.Flags().StringVar(&team, "team", "", "team key (e.g. ABC); defaults to linear.default_team")
 	c.Flags().StringVar(&project, "project", "", "project name or slug id")
-	c.Flags().StringVarP(&state_, "state", "s", "", "workflow state (default: Backlog)")
+	c.Flags().StringVarP(&workflowState, "state", "s", "", "workflow state (default: Backlog)")
 	c.Flags().StringSliceVarP(&labels, "label", "l", nil, "label (repeatable)")
 	_ = c.MarkFlagRequired("title")
 	return c

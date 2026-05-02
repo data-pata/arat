@@ -9,8 +9,6 @@ import (
 )
 
 func newGoCmd(s *state) *cobra.Command {
-	var print bool
-
 	c := &cobra.Command{
 		Use:   "go [name]",
 		Short: "Print the path of a workspace (for shell-function cd integration)",
@@ -60,7 +58,9 @@ default today.
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&print, "print", false, "always print the path on stdout (currently the default)")
+	// --print is accepted for shell-wrapper forward compatibility; printing
+	// the path on stdout is the default and only behaviour today.
+	c.Flags().Bool("print", false, "always print the path on stdout (currently the default)")
 	return c
 }
 
