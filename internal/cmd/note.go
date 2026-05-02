@@ -59,8 +59,8 @@ several positional args; they're joined with single spaces.
 			}
 
 			lc := s.deps.NewLinear()
-			if !lc.Available(cmd.Context()) {
-				return &exitErr{code: ExitExternal, err: errors.New("`linear` binary not found on PATH")}
+			if err := lc.Available(cmd.Context()); err != nil {
+				return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 			}
 			if err := lc.CommentAdd(cmd.Context(), linear.CommentAddOptions{
 				IssueID: ws.Ticket,

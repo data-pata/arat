@@ -32,16 +32,18 @@ func (r *recorderRunner) run() Runner {
 func TestAvailable(t *testing.T) {
 	rr := &recorderRunner{}
 	l := NewWithRunner(rr.run())
-	assert.True(t, l.Available(t.Context()))
+	assert.NoError(t, l.Available(t.Context()))
 	require.Len(t, rr.calls, 1)
 	assert.Equal(t, []string{"linear", "--version"}, rr.calls[0])
 }
 
-func TestAvailable_false(t *testing.T) {
+func TestAvailable_returnsUnderlyingError(t *testing.T) {
+	wantErr := errors.New("not found")
 	l := NewWithRunner(func(context.Context, string, ...string) ([]byte, []byte, error) {
-		return nil, nil, errors.New("not found")
+		return nil, nil, wantErr
 	})
-	assert.False(t, l.Available(t.Context()))
+	err := l.Available(t.Context())
+	assert.ErrorIs(t, err, wantErr)
 }
 
 func TestIssueCreate_argvShape(t *testing.T) {

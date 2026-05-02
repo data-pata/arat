@@ -43,7 +43,7 @@ type Deps struct {
 // LinearClient is the surface Linear-driven commands need. Implemented by
 // internal/linear; tests inject a fake.
 type LinearClient interface {
-	Available(ctx context.Context) bool
+	Available(ctx context.Context) error
 	IssueList(ctx context.Context, opts linear.IssueListOptions) ([]linear.Issue, error)
 	IssueCreate(ctx context.Context, opts linear.IssueCreateOptions) (linear.IssueResult, error)
 	CommentAdd(ctx context.Context, opts linear.CommentAddOptions) error

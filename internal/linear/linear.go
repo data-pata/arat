@@ -41,9 +41,14 @@ func execRunner(ctx context.Context, name string, args ...string) ([]byte, []byt
 }
 
 // Available reports whether the `linear` binary is on PATH and runs.
-func (l *Linear) Available(ctx context.Context) bool {
-	_, _, err := l.run(ctx, "linear", "--version")
-	return err == nil
+// Returns nil when available; otherwise the underlying error (e.g.
+// exec.ErrNotFound) so callers can diagnose a missing binary versus a
+// failing one.
+func (l *Linear) Available(ctx context.Context) error {
+	if _, _, err := l.run(ctx, "linear", "--version"); err != nil {
+		return err
+	}
+	return nil
 }
 
 // Reader is the read-only Linear surface the interactive ticket flow consumes.

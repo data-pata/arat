@@ -126,7 +126,12 @@ type fakeLinear struct {
 	commentCalls []linear.CommentAddOptions
 }
 
-func (f *fakeLinear) Available(context.Context) bool { return f.available }
+func (f *fakeLinear) Available(context.Context) error {
+	if f.available {
+		return nil
+	}
+	return errors.New("linear binary unavailable")
+}
 func (f *fakeLinear) IssueList(_ context.Context, opts linear.IssueListOptions) ([]linear.Issue, error) {
 	f.listCalls = append(f.listCalls, opts)
 	return f.listResult, f.listErr

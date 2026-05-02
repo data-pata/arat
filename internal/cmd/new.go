@@ -58,7 +58,7 @@ config (those that actually exist as a clone at root).
 			// default to no-ticket (preserves AI / pipe behaviour).
 			if ticket == "" && !noTicket && cfg.Linear.Enabled && isInteractive(s.deps) && s.deps.TicketFlow != nil {
 				lc := s.deps.NewLinear()
-				if lc.Available(cmd.Context()) {
+				if err := lc.Available(cmd.Context()); err == nil {
 					res, err := s.deps.TicketFlow(cmd.Context(), lc, cfg.Linear.DefaultTeam, s.deps.Stderr)
 					if err != nil {
 						return &exitErr{code: ExitExternal, err: err}

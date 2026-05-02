@@ -118,8 +118,8 @@ piping into ` + "`arat new`" + `.
 				return &exitErr{code: ExitUsage, err: errors.New("linear is disabled in config (set [linear] enabled = true)")}
 			}
 			lc := s.deps.NewLinear()
-			if !lc.Available(cmd.Context()) {
-				return &exitErr{code: ExitExternal, err: errors.New("`linear` binary not found on PATH; install from https://github.com/schpet/linear-cli")}
+			if err := lc.Available(cmd.Context()); err != nil {
+				return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w; install from https://github.com/schpet/linear-cli", err)}
 			}
 
 			if team == "" {
