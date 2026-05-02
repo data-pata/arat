@@ -33,7 +33,7 @@ type Deps struct {
 	Stderr        io.Writer
 	NewConfig     func(path string) (*config.Config, error)
 	NewService    func(cfg *config.Config) Service
-	PickWorkspace func(ctx context.Context, items []Workspace, out io.Writer) (*Workspace, error)
+	PickWorkspace func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error)
 	NewLinear     func() LinearClient
 	Cwd           func() (string, error)
 	TicketFlow    TicketFlow
@@ -65,16 +65,13 @@ type TicketFlowResult struct {
 
 // Service is the workspace-domain surface the commands need.
 type Service interface {
-	List(ctx context.Context) ([]Workspace, error)
-	Get(ctx context.Context, name string) (*Workspace, error)
-	New(ctx context.Context, opts workspace.NewOptions) (*Workspace, error)
+	List(ctx context.Context) ([]workspace.Workspace, error)
+	Get(ctx context.Context, name string) (*workspace.Workspace, error)
+	New(ctx context.Context, opts workspace.NewOptions) (*workspace.Workspace, error)
 	Remove(ctx context.Context, opts workspace.RemoveOptions) error
 	AttachTicket(ctx context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error)
 	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
 }
-
-// Workspace is a renamed alias to break the import cycle —
-// see internal/cmd/types.go.
 
 // Root builds the root cobra command.
 func Root(d Deps) *cobra.Command {

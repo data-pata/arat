@@ -33,7 +33,7 @@ func main() {
 				Git:                   gitAdapter{g: git.New()},
 			}
 		},
-		PickWorkspace: func(ctx context.Context, items []cmd.Workspace, out io.Writer) (*cmd.Workspace, error) {
+		PickWorkspace: func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error) {
 			ws, err := tui.PickWorkspace(ctx, items, out)
 			if err != nil {
 				return nil, err

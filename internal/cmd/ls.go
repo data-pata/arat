@@ -34,7 +34,7 @@ With --json, emits an array of workspace objects (path, ticket, repos[], etc).
 			if err != nil {
 				if errors.Is(err, workspace.ErrNoWorkspacesDir) {
 					// No workspaces yet is not an error; print an informational note.
-					s.writer().JSONRecord([]Workspace{}, func(out io.Writer) {
+					s.writer().JSONRecord([]workspace.Workspace{}, func(out io.Writer) {
 						fmt.Fprintf(s.deps.Stderr, "no workspaces yet (workspaces_dir does not exist: %s)\n", cfg.WorkspacesDir)
 					})
 					return nil
@@ -47,7 +47,7 @@ With --json, emits an array of workspace objects (path, ticket, repos[], etc).
 	}
 }
 
-func writeLsText(out io.Writer, items []Workspace) {
+func writeLsText(out io.Writer, items []workspace.Workspace) {
 	if len(items) == 0 {
 		fmt.Fprintln(out, "no workspaces")
 		return

@@ -137,7 +137,7 @@ config (those that actually exist as a clone at root).
 
 // resolveParentWorkspace finds the workspace that the current cwd is inside.
 // Used by --from-current and --carry-context.
-func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (string, error), workspacesDir string) (*Workspace, error) {
+func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (string, error), workspacesDir string) (*workspace.Workspace, error) {
 	if cwdFn == nil {
 		return nil, errors.New("--from-current/--carry-context: cwd resolver not configured")
 	}
