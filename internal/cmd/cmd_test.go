@@ -968,7 +968,7 @@ func TestMissingConfig(t *testing.T) {
 
 func TestUnknownCommand(t *testing.T) {
 	r := run(t, []string{"nope"}, nil, nil)
-	assert.NotEqual(t, 0, r.exit)
+	assert.Equal(t, ExitGeneric, r.exit, "uncategorized cobra errors fall through to ExitGeneric")
 }
 
 func TestRoot_helpExits0(t *testing.T) {

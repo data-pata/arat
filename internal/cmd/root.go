@@ -17,13 +17,14 @@ import (
 
 // Exit codes (documented in `arat --help` and per-command help).
 const (
-	ExitOK            = 0
-	ExitUsage         = 2
-	ExitNotFound      = 3
-	ExitPrecondition  = 4
-	ExitConflict      = 5
-	ExitExternal      = 6
-	ExitConfig        = 7
+	ExitOK           = 0
+	ExitGeneric      = 1
+	ExitUsage        = 2
+	ExitNotFound     = 3
+	ExitPrecondition = 4
+	ExitConflict     = 5
+	ExitExternal     = 6
+	ExitConfig       = 7
 )
 
 // Deps is the set of injected dependencies a command may need.
@@ -92,6 +93,7 @@ Stderr is for operational messages; stdout is for results / JSON.
 
 Exit codes:
   0  ok
+  1  generic failure (uncategorized)
   2  usage error
   3  not found
   4  precondition failed (dirty / unpushed / stash)
@@ -190,5 +192,5 @@ func Execute(d Deps, args []string) int {
 	if errors.As(err, &ee) {
 		return ee.code
 	}
-	return ExitUsage
+	return ExitGeneric
 }

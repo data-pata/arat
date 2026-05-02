@@ -99,6 +99,7 @@ to stderr.
 | Code | Meaning |
 | --- | --- |
 | 0 | success |
+| 1 | generic failure (uncategorized) |
 | 2 | usage error (bad flags / args) |
 | 3 | not found (workspace, ticket, repo) |
 | 4 | precondition failed (dirty / unpushed / stashed; pass `--force`) |
