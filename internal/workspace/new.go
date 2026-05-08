@@ -205,7 +205,64 @@ func (s *Service) ResolveRepos(explicit []string) ([]string, error) {
 	if len(explicit) > 0 {
 		return explicit, nil
 	}
+	out, err := s.defaultPlusGlob()
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no repos resolved: configure default_repos or auto_repos_glob, or pass --repos")
+	}
+	return out, nil
+}
 
+// ListRepoCandidates returns every full clone at Root, with Selected set to
+// true for repos that ResolveRepos would return without an explicit list. The
+// returned slice is ordered: default_repos first (config order), then glob
+// matches sorted, then any other clones at Root sorted by name.
+func (s *Service) ListRepoCandidates() ([]RepoCandidate, error) {
+	preselected, err := s.defaultPlusGlob()
+	if err != nil {
+		return nil, err
+	}
+	selected := make(map[string]struct{}, len(preselected))
+	for _, n := range preselected {
+		selected[n] = struct{}{}
+	}
+
+	entries, err := os.ReadDir(s.Root)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", s.Root, err)
+	}
+	var others []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if _, ok := selected[name]; ok {
+			continue
+		}
+		if !dirExists(filepath.Join(s.Root, name, ".git")) {
+			continue
+		}
+		others = append(others, name)
+	}
+	sort.Strings(others)
+
+	out := make([]RepoCandidate, 0, len(preselected)+len(others))
+	for _, n := range preselected {
+		out = append(out, RepoCandidate{Name: n, Selected: true})
+	}
+	for _, n := range others {
+		out = append(out, RepoCandidate{Name: n, Selected: false})
+	}
+	return out, nil
+}
+
+// defaultPlusGlob is the union of DefaultRepos (config order) and
+// AutoReposGlob matches (sorted), filtered to those that look like a full
+// clone at Root. Used by ResolveRepos and ListRepoCandidates.
+func (s *Service) defaultPlusGlob() ([]string, error) {
 	seen := make(map[string]struct{})
 	out := make([]string, 0, len(s.DefaultRepos))
 	for _, r := range s.DefaultRepos {
@@ -239,9 +296,6 @@ func (s *Service) ResolveRepos(explicit []string) ([]string, error) {
 	}
 	sort.Strings(globMatches)
 	out = append(out, globMatches...)
-	if len(out) == 0 {
-		return nil, errors.New("no repos resolved: configure default_repos or auto_repos_glob, or pass --repos")
-	}
 	return out, nil
 }
 

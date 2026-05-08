@@ -34,8 +34,10 @@ and the CLAUDE.md links to the ticket. If neither --ticket nor --no-ticket is
 given, behaves like --no-ticket (interactive ticket selection comes in a later
 phase).
 
-If --repos is omitted, uses the union of default_repos and auto_repos_glob from
-config (those that actually exist as a clone at root).
+If --repos is omitted: in a tty, an interactive picker opens with
+default_repos + auto_repos_glob pre-selected and any other clones at root
+available to toggle in. Outside a tty (AI / pipes), falls back to the union of
+default_repos and auto_repos_glob.
 `,
 		Example: `  arat new postal-fix --no-ticket
   arat new postal-fix --ticket abc-123
@@ -52,6 +54,26 @@ config (those that actually exist as a clone at root).
 				return err
 			}
 			svc := s.deps.NewService(cfg)
+
+			// Interactive repo flow: when --repos wasn't given AND we have a
+			// tty, open the multi-select picker pre-populated with the
+			// default+glob set. Non-tty (AI/pipe) keeps the union default.
+			if len(repos) == 0 && isInteractive(s.deps) && s.deps.RepoFlow != nil {
+				cands, err := svc.ListRepoCandidates()
+				if err != nil {
+					return &exitErr{code: ExitExternal, err: err}
+				}
+				if len(cands) > 0 {
+					res, err := s.deps.RepoFlow(cmd.Context(), cands, s.deps.Stderr)
+					if err != nil {
+						return &exitErr{code: ExitExternal, err: err}
+					}
+					if res.Cancelled {
+						return &exitErr{code: ExitUsage, err: errors.New("cancelled")}
+					}
+					repos = res.Repos
+				}
+			}
 
 			// Interactive ticket flow: when neither --ticket nor --no-ticket
 			// was given AND we have a tty, open the chooser. Otherwise

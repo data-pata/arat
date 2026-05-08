@@ -67,6 +67,13 @@ func main() {
 			}
 			return out_, nil
 		},
+		RepoFlow: func(ctx context.Context, cands []workspace.RepoCandidate, out io.Writer) (cmd.RepoFlowResult, error) {
+			selected, cancelled, err := tui.PickRepos(ctx, cands, out)
+			if err != nil {
+				return cmd.RepoFlowResult{}, err
+			}
+			return cmd.RepoFlowResult{Cancelled: cancelled, Repos: selected}, nil
+		},
 	}
 	os.Exit(cmd.Execute(deps, os.Args[1:]))
 }

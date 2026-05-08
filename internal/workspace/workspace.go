@@ -28,6 +28,14 @@ type RepoStatus struct {
 	Stashes  int    `json:"stashes"`
 }
 
+// RepoCandidate is a repo at <root> that could be added as a worktree to a new
+// workspace. Selected is true for repos that would be picked by the
+// default+glob resolution (i.e. what `arat new` uses without --repos).
+type RepoCandidate struct {
+	Name     string `json:"name"`
+	Selected bool   `json:"selected"`
+}
+
 // ParseName splits a workspace dir name into (ticket, short).
 //
 // Rules:

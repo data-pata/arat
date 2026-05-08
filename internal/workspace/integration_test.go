@@ -596,6 +596,57 @@ func TestResolveRepos_noneResolved(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestListRepoCandidates_preselectsDefaultPlusGlob(t *testing.T) {
+	root := setupRoot(t, "alpha", "core-app", "infra-k8s", "extra", "stray")
+	svc := newSvc(t, root)
+	svc.DefaultRepos = []string{"alpha"}
+	svc.AutoReposGlob = []string{"core-*", "infra-*"}
+
+	got, err := svc.ListRepoCandidates()
+	require.NoError(t, err)
+	// Selected first (default+glob in their resolution order), then unselected
+	// alphabetically.
+	assert.Equal(t, []RepoCandidate{
+		{Name: "alpha", Selected: true},
+		{Name: "core-app", Selected: true},
+		{Name: "infra-k8s", Selected: true},
+		{Name: "extra", Selected: false},
+		{Name: "stray", Selected: false},
+	}, got)
+}
+
+func TestListRepoCandidates_skipsNonGitDirs(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	// Plain directory at root with no .git — must not appear.
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "not-a-repo"), 0o755))
+	svc := newSvc(t, root)
+
+	got, err := svc.ListRepoCandidates()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "repo-a", got[0].Name)
+	assert.False(t, got[0].Selected, "no default/glob configured: nothing preselected")
+}
+
+func TestListRepoCandidates_skipsLinkedWorktrees(t *testing.T) {
+	root := setupRoot(t, "core-app")
+	runGit(t, filepath.Join(root, "core-app"), "worktree", "add", "--detach", filepath.Join(root, "core-app-bis"))
+	svc := newSvc(t, root)
+
+	got, err := svc.ListRepoCandidates()
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "core-app", got[0].Name)
+}
+
+func TestListRepoCandidates_emptyRoot(t *testing.T) {
+	root := setupRoot(t)
+	svc := newSvc(t, root)
+	got, err := svc.ListRepoCandidates()
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
 func assertFileContains(t *testing.T, path, want string) {
 	t.Helper()
 	data, err := os.ReadFile(path)

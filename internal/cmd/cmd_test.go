@@ -19,23 +19,26 @@ import (
 
 // fakeService implements cmd.Service for handler-level tests.
 type fakeService struct {
-	listResult     []workspace.Workspace
-	listErr        error
-	getResult      *workspace.Workspace
-	getErr         error
-	newResult      *workspace.Workspace
-	newErr         error
-	removeErr      error
-	attachResult   *workspace.AttachResult
-	attachErr      error
-	addReposResult *workspace.AddReposResult
-	addReposErr    error
+	listResult       []workspace.Workspace
+	listErr          error
+	getResult        *workspace.Workspace
+	getErr           error
+	newResult        *workspace.Workspace
+	newErr           error
+	removeErr        error
+	attachResult     *workspace.AttachResult
+	attachErr        error
+	addReposResult   *workspace.AddReposResult
+	addReposErr      error
+	candidatesResult []workspace.RepoCandidate
+	candidatesErr    error
 
-	getCalls      []string
-	newCalls      []workspace.NewOptions
-	removeCalls   []workspace.RemoveOptions
-	attachCalls   []workspace.AttachOptions
-	addReposCalls []workspace.AddReposOptions
+	getCalls         []string
+	newCalls         []workspace.NewOptions
+	removeCalls      []workspace.RemoveOptions
+	attachCalls      []workspace.AttachOptions
+	addReposCalls    []workspace.AddReposOptions
+	candidatesCalled int
 }
 
 func (f *fakeService) List(_ context.Context) ([]workspace.Workspace, error) {
@@ -61,6 +64,10 @@ func (f *fakeService) AddRepos(_ context.Context, opts workspace.AddReposOptions
 	f.addReposCalls = append(f.addReposCalls, opts)
 	return f.addReposResult, f.addReposErr
 }
+func (f *fakeService) ListRepoCandidates() ([]workspace.RepoCandidate, error) {
+	f.candidatesCalled++
+	return f.candidatesResult, f.candidatesErr
+}
 
 type runResult struct {
 	stdout string
@@ -84,6 +91,7 @@ type depsOpts struct {
 	linear   *fakeLinear
 	cwd      func() (string, error)
 	tickFlow TicketFlow
+	repoFlow RepoFlow
 	isTTY    func() bool
 }
 
@@ -107,6 +115,7 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 		deps.NewLinear = func() LinearClient { return opts.linear }
 	}
 	deps.TicketFlow = opts.tickFlow
+	deps.RepoFlow = opts.repoFlow
 	deps.IsTTY = opts.isTTY
 	exit := Execute(deps, args)
 	return runResult{stdout.String(), stderr.String(), exit, svc}
@@ -403,6 +412,97 @@ func TestNew_explicitNoTicketSkipsFlow(t *testing.T) {
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{linear: &fakeLinear{available: true}, tickFlow: flow, isTTY: func() bool { return true }})
 	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.False(t, flowCalled)
+}
+
+// --- new: interactive repo flow --------------------------------------
+
+func TestNew_interactiveRepoPickerWiresSelection(t *testing.T) {
+	svc := &fakeService{
+		newResult: &workspace.Workspace{Name: "x", Path: "/p"},
+		candidatesResult: []workspace.RepoCandidate{
+			{Name: "core", Selected: true},
+			{Name: "infra", Selected: false},
+		},
+	}
+	flow := func(_ context.Context, cands []workspace.RepoCandidate, _ io.Writer) (RepoFlowResult, error) {
+		// echo what the picker showed: confirm core+infra.
+		require.Len(t, cands, 2)
+		return RepoFlowResult{Repos: []string{"core", "infra"}}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, 1, svc.candidatesCalled)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, []string{"core", "infra"}, svc.newCalls[0].Repos)
+}
+
+func TestNew_interactiveRepoPickerCancelled(t *testing.T) {
+	svc := &fakeService{candidatesResult: []workspace.RepoCandidate{{Name: "core", Selected: true}}}
+	flow := func(_ context.Context, _ []workspace.RepoCandidate, _ io.Writer) (RepoFlowResult, error) {
+		return RepoFlowResult{Cancelled: true}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Empty(t, svc.newCalls, "service.New must not run when the user cancelled the picker")
+}
+
+func TestNew_interactiveRepoPickerSkippedByExplicitRepos(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
+	flowCalled := false
+	flow := func(_ context.Context, _ []workspace.RepoCandidate, _ io.Writer) (RepoFlowResult, error) {
+		flowCalled = true
+		return RepoFlowResult{}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--repos", "a,b"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.False(t, flowCalled, "explicit --repos must short-circuit the picker")
+	assert.Equal(t, 0, svc.candidatesCalled)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, []string{"a", "b"}, svc.newCalls[0].Repos)
+}
+
+func TestNew_interactiveRepoPickerSkippedWhenNotTTY(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
+	flowCalled := false
+	flow := func(_ context.Context, _ []workspace.RepoCandidate, _ io.Writer) (RepoFlowResult, error) {
+		flowCalled = true
+		return RepoFlowResult{}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return false }})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.False(t, flowCalled, "non-tty must keep the default+glob fallback")
+	assert.Equal(t, 0, svc.candidatesCalled)
+	require.Len(t, svc.newCalls, 1)
+	assert.Empty(t, svc.newCalls[0].Repos, "empty repos -> service falls back to default+glob")
+}
+
+func TestNew_interactiveRepoPickerSkippedWhenNoCandidates(t *testing.T) {
+	svc := &fakeService{
+		newResult:        &workspace.Workspace{Name: "x", Path: "/p"},
+		candidatesResult: nil, // empty root: no candidates to pick from
+	}
+	flowCalled := false
+	flow := func(_ context.Context, _ []workspace.RepoCandidate, _ io.Writer) (RepoFlowResult, error) {
+		flowCalled = true
+		return RepoFlowResult{}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, 1, svc.candidatesCalled)
+	assert.False(t, flowCalled, "no candidates -> picker not invoked, service surfaces the empty-root error")
+}
+
+func TestNew_interactiveRepoPickerListErrorPropagates(t *testing.T) {
+	svc := &fakeService{candidatesErr: errors.New("disk on fire")}
+	flowCalled := false
+	flow := func(_ context.Context, _ []workspace.RepoCandidate, _ io.Writer) (RepoFlowResult, error) {
+		flowCalled = true
+		return RepoFlowResult{}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, ExitExternal, r.exit)
+	assert.Contains(t, r.stderr, "disk on fire")
 	assert.False(t, flowCalled)
 }
 

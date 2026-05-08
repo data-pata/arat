@@ -38,6 +38,7 @@ type Deps struct {
 	NewLinear     func() LinearClient
 	Cwd           func() (string, error)
 	TicketFlow    TicketFlow
+	RepoFlow      RepoFlow
 	IsTTY         func() bool // returns whether stdin is a tty; defaults to false
 }
 
@@ -64,6 +65,17 @@ type TicketFlowResult struct {
 	Hint      string // when non-empty, print this to stderr (and skip)
 }
 
+// RepoFlow is the interactive multi-select repo picker. Returns either the
+// chosen repo names (Repos) or Cancelled. The cmd layer is responsible for
+// fetching the candidate list from the workspace service before invoking it.
+type RepoFlow func(ctx context.Context, candidates []workspace.RepoCandidate, out io.Writer) (RepoFlowResult, error)
+
+// RepoFlowResult is the cmd-side outcome of RepoFlow.
+type RepoFlowResult struct {
+	Cancelled bool
+	Repos     []string // non-empty when the user confirmed a selection
+}
+
 // Service is the workspace-domain surface the commands need.
 type Service interface {
 	List(ctx context.Context) ([]workspace.Workspace, error)
@@ -72,6 +84,7 @@ type Service interface {
 	Remove(ctx context.Context, opts workspace.RemoveOptions) error
 	AttachTicket(ctx context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error)
 	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
+	ListRepoCandidates() ([]workspace.RepoCandidate, error)
 }
 
 // Root builds the root cobra command.
