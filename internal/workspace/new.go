@@ -4,12 +4,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
+
+// newConcurrency caps the number of in-flight per-repo fetch+worktree-add jobs
+// when materialising a workspace. Each job opens an SSH connection for the
+// fetch, so the cap doubles as a politeness limit toward the remote.
+const newConcurrency = 25
 
 // NewOptions controls Service.New.
 type NewOptions struct {
@@ -31,6 +40,11 @@ type NewOptions struct {
 	// GenerateCodeWorkspace, when true, writes a <name>.code-workspace JSON
 	// file alongside the workspace dir.
 	GenerateCodeWorkspace bool
+
+	// Progress, when non-nil, receives one line per per-repo step (fetch,
+	// worktree add) so callers can show "which repo am I on" feedback while
+	// New runs. Useful for diagnosing hangs since each step shells out to git.
+	Progress io.Writer
 }
 
 // CarryContext is the parent-workspace info copied forward when --carry-context
@@ -86,28 +100,44 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 		base = "origin/HEAD"
 	}
 
+	// Pre-flight: every canonical clone must exist before we spawn any work,
+	// so a missing repo fails fast and doesn't race against in-flight fetches.
 	for _, repo := range repos {
-		canonical := filepath.Join(s.Root, repo)
-		if !dirExists(canonical) {
+		if !dirExists(filepath.Join(s.Root, repo)) {
 			cleanup()
-			return nil, fmt.Errorf("%w: canonical repo %s not found at %s", ErrNotFound, repo, canonical)
+			return nil, fmt.Errorf("%w: canonical repo %s not found at %s", ErrNotFound, repo, filepath.Join(s.Root, repo))
 		}
-		// Best-effort fetch; surface errors but only when the worktree add then fails.
-		fetchErr := s.Git.Fetch(ctx, canonical)
+	}
 
-		repoBase := base
-		if alt, ok := opts.BaseByRepo[repo]; ok && alt != "" {
-			repoBase = alt
-		}
+	progress := newSyncWriter(opts.Progress)
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(newConcurrency)
+	for _, repo := range repos {
+		g.Go(func() error {
+			canonical := filepath.Join(s.Root, repo)
+			progressf(progress, "fetching %s…\n", repo)
+			// Best-effort fetch; surface errors but only when the worktree add then fails.
+			fetchErr := s.Git.Fetch(gctx, canonical)
 
-		target := filepath.Join(full, repo)
-		if err := s.Git.WorktreeAdd(ctx, canonical, branch, target, repoBase); err != nil {
-			cleanup()
-			if fetchErr != nil {
-				return nil, fmt.Errorf("worktree add for %s: %w (preceding fetch error: %v)", repo, err, fetchErr)
+			repoBase := base
+			if alt, ok := opts.BaseByRepo[repo]; ok && alt != "" {
+				repoBase = alt
 			}
-			return nil, fmt.Errorf("worktree add for %s: %w", repo, err)
-		}
+
+			target := filepath.Join(full, repo)
+			progressf(progress, "creating worktree %s (base %s)…\n", repo, repoBase)
+			if err := s.Git.WorktreeAdd(gctx, canonical, branch, target, repoBase); err != nil {
+				if fetchErr != nil {
+					return fmt.Errorf("worktree add for %s: %w (preceding fetch error: %v)", repo, err, fetchErr)
+				}
+				return fmt.Errorf("worktree add for %s: %w", repo, err)
+			}
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		cleanup()
+		return nil, err
 	}
 
 	now := s.now()
@@ -213,6 +243,38 @@ func (s *Service) ResolveRepos(explicit []string) ([]string, error) {
 		return nil, errors.New("no repos resolved: configure default_repos or auto_repos_glob, or pass --repos")
 	}
 	return out, nil
+}
+
+// progressf writes a formatted line to w if w is non-nil. Errors are ignored —
+// progress output is best-effort and never fails the operation.
+func progressf(w io.Writer, format string, args ...any) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, format, args...)
+}
+
+// syncWriter serialises Write calls so concurrent goroutines can share a
+// single io.Writer (e.g. os.Stderr or a test bytes.Buffer) without interleaving
+// or racing on writers that aren't themselves goroutine-safe.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// newSyncWriter wraps w so concurrent Write calls don't interleave. Returns
+// nil when w is nil, so progressf's nil-guard still short-circuits.
+func newSyncWriter(w io.Writer) io.Writer {
+	if w == nil {
+		return nil
+	}
+	return &syncWriter{w: w}
 }
 
 func dirExists(p string) bool {

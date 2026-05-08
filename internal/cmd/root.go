@@ -79,6 +79,7 @@ func Root(d Deps) *cobra.Command {
 	var (
 		configPath string
 		jsonOut    bool
+		verbose    bool
 	)
 
 	root := &cobra.Command{
@@ -107,11 +108,13 @@ Exit codes:
 
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to config file (default: $ARAT_CONFIG, $XDG_CONFIG_HOME/arat/config.toml, $HOME/.config/arat/config.toml)")
 	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "emit JSON output where supported")
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "emit per-step progress to stderr (e.g. one line per repo during `arat new`)")
 
 	state := &state{
 		deps:       d,
 		configPath: &configPath,
 		jsonOut:    &jsonOut,
+		verbose:    &verbose,
 	}
 
 	root.AddCommand(
@@ -133,6 +136,7 @@ type state struct {
 	deps       Deps
 	configPath *string
 	jsonOut    *bool
+	verbose    *bool
 }
 
 func (s *state) writer() *output.Writer {

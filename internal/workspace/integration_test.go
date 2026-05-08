@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -99,6 +100,42 @@ func TestNew_noTicket(t *testing.T) {
 	assert.Equal(t, "ps--experiment", ws.Repos[0].Branch)
 	assertFileContains(t, filepath.Join(ws.Path, "CLAUDE.md"), "# experiment\n")
 	assertFileContains(t, filepath.Join(ws.Path, "CLAUDE.md"), "no ticket attached yet")
+}
+
+func TestNew_progressEmitsPerRepo(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+
+	var buf bytes.Buffer
+	_, err := svc.New(t.Context(), NewOptions{
+		ShortName: "fix-thing",
+		Repos:     []string{"repo-a", "repo-b"},
+		Progress:  &buf,
+	})
+	require.NoError(t, err)
+
+	// Order is non-deterministic (per-repo work runs in parallel), so assert
+	// each expected line appears exactly once rather than a fixed sequence.
+	got := buf.String()
+	for _, want := range []string{
+		"fetching repo-a…\n",
+		"creating worktree repo-a (base HEAD)…\n",
+		"fetching repo-b…\n",
+		"creating worktree repo-b (base HEAD)…\n",
+	} {
+		assert.Equal(t, 1, strings.Count(got, want), "expected one occurrence of %q in:\n%s", want, got)
+	}
+}
+
+func TestNew_progressNilWriterIsSafe(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	_, err := svc.New(t.Context(), NewOptions{
+		ShortName: "x",
+		Repos:     []string{"repo-a"},
+		// Progress: nil
+	})
+	require.NoError(t, err)
 }
 
 func TestNew_alreadyExists(t *testing.T) {

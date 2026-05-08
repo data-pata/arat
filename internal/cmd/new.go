@@ -82,6 +82,9 @@ config (those that actually exist as a clone at root).
 				Repos:                 repos,
 				GenerateCodeWorkspace: codeWorkspace,
 			}
+			if s.verbose != nil && *s.verbose {
+				newOpts.Progress = s.deps.Stderr
+			}
 
 			if fromCurrent || carryContext {
 				parent, err := resolveParentWorkspace(svc, cmd.Context(), s.deps.Cwd, cfg.WorkspacesDir)
