@@ -81,7 +81,7 @@ type Service interface {
 	List(ctx context.Context) ([]workspace.Workspace, error)
 	Get(ctx context.Context, name string) (*workspace.Workspace, error)
 	New(ctx context.Context, opts workspace.NewOptions) (*workspace.Workspace, error)
-	Remove(ctx context.Context, opts workspace.RemoveOptions) error
+	Remove(ctx context.Context, opts workspace.RemoveOptions) (*workspace.RemoveResult, error)
 	AttachTicket(ctx context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error)
 	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
 	ListRepoCandidates() ([]workspace.RepoCandidate, error)

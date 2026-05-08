@@ -21,9 +21,13 @@ func newRmCmd(s *state) *cobra.Command {
 		Long: `Remove a workspace, its git worktrees, and (by default) the feature
 branches in each canonical repo.
 
-By default, refuses if any worktree has uncommitted changes, unpushed commits,
-or stash entries — pass --force to override. Use --keep-branches to remove the
-worktrees but keep the branches in the canonical repos.
+By default, refuses if any worktree has uncommitted changes or unpushed commits
+— pass --force to override. Use --keep-branches to remove the worktrees but
+keep the branches in the canonical repos.
+
+Stash entries do not block: stash refs live on the canonical clone and survive
+worktree removal, so removal proceeds and a note is printed pointing at the
+canonical clone where the stashes can still be recovered.
 
 Returns exit code 4 (precondition) when safety checks trip without --force.
 `,
@@ -38,7 +42,7 @@ Returns exit code 4 (precondition) when safety checks trip without --force.
 			}
 			svc := s.deps.NewService(cfg)
 
-			err = svc.Remove(cmd.Context(), workspace.RemoveOptions{
+			res, err := svc.Remove(cmd.Context(), workspace.RemoveOptions{
 				Name:         args[0],
 				Force:        force,
 				KeepBranches: keepBranches,
@@ -48,12 +52,26 @@ Returns exit code 4 (precondition) when safety checks trip without --force.
 			}
 
 			fmt.Fprintf(s.deps.Stderr, "removed workspace %s\n", args[0])
+			if res != nil {
+				for _, sr := range res.StashedRepos {
+					fmt.Fprintf(s.deps.Stderr,
+						"  note: %d stash %s preserved in %s (git -C %s stash list)\n",
+						sr.Stashes, pluralize(sr.Stashes, "entry", "entries"), sr.CanonicalRepo, sr.CanonicalRepo)
+				}
+			}
 			return nil
 		},
 	}
-	c.Flags().BoolVarP(&force, "force", "f", false, "remove even if dirty / unpushed / stashed")
+	c.Flags().BoolVarP(&force, "force", "f", false, "remove even if dirty or unpushed")
 	c.Flags().BoolVar(&keepBranches, "keep-branches", false, "do not delete the branches when removing worktrees")
 	return c
+}
+
+func pluralize(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 func mapRmError(err error) error {
@@ -62,8 +80,7 @@ func mapRmError(err error) error {
 	case errors.Is(err, workspace.ErrNotFound):
 		return &exitErr{code: ExitNotFound, err: err}
 	case errors.As(err, &pre):
-		hint := err.Error() + "\nrun with --force to override"
-		return &exitErr{code: ExitPrecondition, err: errors.New(hint)}
+		return &exitErr{code: ExitPrecondition, err: fmt.Errorf("%w\nrun with --force to override", err)}
 	}
 	return &exitErr{code: ExitExternal, err: err}
 }

@@ -211,7 +211,8 @@ func TestRemove_clean(t *testing.T) {
 	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a", "repo-b"}})
 	require.NoError(t, err)
 
-	require.NoError(t, svc.Remove(t.Context(), RemoveOptions{Name: "x"}))
+	_, err = svc.Remove(t.Context(), RemoveOptions{Name: "x"})
+	require.NoError(t, err)
 	assert.False(t, dirExists(filepath.Join(svc.WorkspacesDir, "x")))
 
 	// Branches must be deleted from canonical repos.
@@ -228,14 +229,15 @@ func TestRemove_keepsBranches(t *testing.T) {
 
 	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
 	require.NoError(t, err)
-	require.NoError(t, svc.Remove(t.Context(), RemoveOptions{Name: "x", KeepBranches: true}))
+	_, err = svc.Remove(t.Context(), RemoveOptions{Name: "x", KeepBranches: true})
+	require.NoError(t, err)
 
 	out, err := exec.Command("git", "-C", filepath.Join(root, "repo-a"), "branch", "--list", "ps--x").CombinedOutput()
 	require.NoError(t, err)
 	assert.Contains(t, string(out), "ps--x")
 }
 
-func TestRemove_stashRefuses(t *testing.T) {
+func TestRemove_stashAllowedAndPreserved(t *testing.T) {
 	root := setupRoot(t, "repo-a")
 	svc := newSvc(t, root)
 
@@ -247,10 +249,33 @@ func TestRemove_stashRefuses(t *testing.T) {
 	runGit(t, ws.Repos[0].Path, "add", ".")
 	runGit(t, ws.Repos[0].Path, "stash", "push", "-m", "wip")
 
-	err = svc.Remove(t.Context(), RemoveOptions{Name: "x"})
-	var pre *ErrPrecondition
-	require.ErrorAs(t, err, &pre)
-	assert.Contains(t, err.Error(), "1 stash entries")
+	res, err := svc.Remove(t.Context(), RemoveOptions{Name: "x"})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, res.StashedRepos, 1)
+	assert.Equal(t, ws.Repos[0].Path, res.StashedRepos[0].Path)
+	assert.Equal(t, filepath.Join(root, "repo-a"), res.StashedRepos[0].CanonicalRepo)
+	assert.Equal(t, 1, res.StashedRepos[0].Stashes)
+
+	// Workspace dir is gone, but the stash ref still lives in the canonical
+	// clone — this is the whole point of the change.
+	assert.False(t, dirExists(ws.Path))
+	out, gerr := exec.Command("git", "-C", filepath.Join(root, "repo-a"), "stash", "list").CombinedOutput()
+	require.NoError(t, gerr, "stash list in canonical: %s", out)
+	assert.Contains(t, string(out), "wip", "stash entry must survive worktree removal")
+}
+
+func TestRemove_noStashesMeansEmptyResult(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+
+	_, err := svc.New(t.Context(), NewOptions{ShortName: "x", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	res, err := svc.Remove(t.Context(), RemoveOptions{Name: "x"})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Empty(t, res.StashedRepos, "no stashes -> nothing to surface")
 }
 
 func TestRemove_unpushedRefuses(t *testing.T) {
@@ -282,7 +307,7 @@ func TestRemove_unpushedRefuses(t *testing.T) {
 	// Set upstream so unpushed-check has a baseline.
 	runGit(t, ws.Repos[0].Path, "branch", "--set-upstream-to=origin/main")
 
-	err = svc.Remove(t.Context(), RemoveOptions{Name: "x"})
+	_, err = svc.Remove(t.Context(), RemoveOptions{Name: "x"})
 	var pre *ErrPrecondition
 	require.ErrorAs(t, err, &pre)
 	assert.Contains(t, err.Error(), "unpushed commits")
@@ -337,7 +362,7 @@ func TestRemove_dirtyRefuses(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(ws.Repos[0].Path, "wip.txt"), []byte("dirty"), 0o644))
 
-	err = svc.Remove(t.Context(), RemoveOptions{Name: "x"})
+	_, err = svc.Remove(t.Context(), RemoveOptions{Name: "x"})
 	var pre *ErrPrecondition
 	require.ErrorAs(t, err, &pre)
 	assert.Contains(t, err.Error(), "uncommitted changes")
@@ -345,14 +370,15 @@ func TestRemove_dirtyRefuses(t *testing.T) {
 	assert.True(t, dirExists(ws.Path))
 
 	// --force overrides
-	require.NoError(t, svc.Remove(t.Context(), RemoveOptions{Name: "x", Force: true}))
+	_, err = svc.Remove(t.Context(), RemoveOptions{Name: "x", Force: true})
+	require.NoError(t, err)
 	assert.False(t, dirExists(ws.Path))
 }
 
 func TestRemove_notFound(t *testing.T) {
 	root := setupRoot(t, "repo-a")
 	svc := newSvc(t, root)
-	err := svc.Remove(t.Context(), RemoveOptions{Name: "nope"})
+	_, err := svc.Remove(t.Context(), RemoveOptions{Name: "nope"})
 	require.ErrorIs(t, err, ErrNotFound)
 }
 

@@ -25,6 +25,7 @@ type fakeService struct {
 	getErr           error
 	newResult        *workspace.Workspace
 	newErr           error
+	removeResult     *workspace.RemoveResult
 	removeErr        error
 	attachResult     *workspace.AttachResult
 	attachErr        error
@@ -52,9 +53,9 @@ func (f *fakeService) New(_ context.Context, opts workspace.NewOptions) (*worksp
 	f.newCalls = append(f.newCalls, opts)
 	return f.newResult, f.newErr
 }
-func (f *fakeService) Remove(_ context.Context, opts workspace.RemoveOptions) error {
+func (f *fakeService) Remove(_ context.Context, opts workspace.RemoveOptions) (*workspace.RemoveResult, error) {
 	f.removeCalls = append(f.removeCalls, opts)
-	return f.removeErr
+	return f.removeResult, f.removeErr
 }
 func (f *fakeService) AttachTicket(_ context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error) {
 	f.attachCalls = append(f.attachCalls, opts)
@@ -568,11 +569,33 @@ func TestRm_notFound(t *testing.T) {
 }
 
 func TestRm_precondition(t *testing.T) {
-	svc := &fakeService{removeErr: &workspace.ErrPrecondition{Reasons: []string{"/p: uncommitted changes", "/p: 2 stash entries"}}}
+	svc := &fakeService{removeErr: &workspace.ErrPrecondition{Reasons: []string{"/p: uncommitted changes", "/p: unpushed commits on ps--x"}}}
 	r := run(t, []string{"rm", "x"}, nil, svc)
 	assert.Equal(t, ExitPrecondition, r.exit)
 	assert.Contains(t, r.stderr, "uncommitted changes")
 	assert.Contains(t, r.stderr, "--force to override")
+}
+
+func TestRm_stashedReposSurfaceAsNote(t *testing.T) {
+	svc := &fakeService{removeResult: &workspace.RemoveResult{
+		StashedRepos: []workspace.StashedRepo{
+			{Path: "/ws/x/repo-a", CanonicalRepo: "/root/repo-a", Stashes: 1},
+			{Path: "/ws/x/repo-b", CanonicalRepo: "/root/repo-b", Stashes: 3},
+		},
+	}}
+	r := run(t, []string{"rm", "x"}, nil, svc)
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Contains(t, r.stderr, "removed workspace x")
+	assert.Contains(t, r.stderr, "1 stash entry preserved in /root/repo-a")
+	assert.Contains(t, r.stderr, "3 stash entries preserved in /root/repo-b")
+	assert.Contains(t, r.stderr, "git -C /root/repo-a stash list")
+}
+
+func TestRm_noStashedReposNoNote(t *testing.T) {
+	svc := &fakeService{removeResult: &workspace.RemoveResult{}}
+	r := run(t, []string{"rm", "x"}, nil, svc)
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.NotContains(t, r.stderr, "preserved", "no stashed repos -> no note line")
 }
 
 // --- go --------------------------------------------------------------
