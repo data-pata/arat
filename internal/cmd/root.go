@@ -40,6 +40,7 @@ type Deps struct {
 	TicketFlow    TicketFlow
 	RepoFlow      RepoFlow
 	IsTTY         func() bool // returns whether stdin is a tty; defaults to false
+	Confirm       func(prompt string) (bool, error) // y/N prompt; returns true only on explicit yes
 }
 
 // LinearClient is the surface Linear-driven commands need. Implemented by

@@ -55,7 +55,22 @@ Returns exit code 4 (precondition) when safety checks trip without --force.
 					return err
 				}
 				if chosen == nil {
-					return nil // user cancelled
+					return nil // user cancelled the picker
+				}
+				// Picker-mode confirmation: a stray Enter on the picker
+				// would otherwise silently nuke whichever workspace was
+				// highlighted. Explicit-name `arat rm foo` skips this —
+				// typing the full name is itself a confirmation.
+				if s.deps.Confirm == nil {
+					return &exitErr{code: ExitUsage, err: errors.New("interactive confirm not available (no Confirm impl wired)")}
+				}
+				ok, err := s.deps.Confirm(fmt.Sprintf("Remove workspace %q? [y/N]: ", chosen.Name))
+				if err != nil {
+					return &exitErr{code: ExitExternal, err: err}
+				}
+				if !ok {
+					fmt.Fprintln(s.deps.Stderr, "cancelled")
+					return nil
 				}
 				name = chosen.Name
 			}

@@ -110,6 +110,7 @@ type depsOpts struct {
 	tickFlow TicketFlow
 	repoFlow RepoFlow
 	isTTY    func() bool
+	confirm  func(prompt string) (bool, error)
 }
 
 func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeService, opts depsOpts) runResult {
@@ -134,6 +135,7 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 	deps.TicketFlow = opts.tickFlow
 	deps.RepoFlow = opts.repoFlow
 	deps.IsTTY = opts.isTTY
+	deps.Confirm = opts.confirm
 	exit := Execute(deps, args)
 	return runResult{stdout.String(), stderr.String(), exit, svc}
 }
@@ -647,9 +649,15 @@ func TestRm_noStashedReposNoNote(t *testing.T) {
 
 func TestRm_pickerHappy(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}, {Name: "b", Path: "/b"}}}
-	r := runWithPicker(t, []string{"rm"}, nil, svc, func(_ context.Context, items []workspace.Workspace, _ io.Writer) (*workspace.Workspace, error) {
-		require.Len(t, items, 2)
-		return &workspace.Workspace{Name: "b", Path: "/b"}, nil
+	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		picker: func(_ context.Context, items []workspace.Workspace, _ io.Writer) (*workspace.Workspace, error) {
+			require.Len(t, items, 2)
+			return &workspace.Workspace{Name: "b", Path: "/b"}, nil
+		},
+		confirm: func(prompt string) (bool, error) {
+			assert.Contains(t, prompt, `"b"`)
+			return true, nil
+		},
 	})
 	assert.Equal(t, 0, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
@@ -657,10 +665,29 @@ func TestRm_pickerHappy(t *testing.T) {
 	assert.Contains(t, r.stderr, "removed workspace b")
 }
 
+func TestRm_pickerConfirmDeclined(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}}}
+	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		picker: func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
+			return &workspace.Workspace{Name: "a", Path: "/a"}, nil
+		},
+		confirm: func(string) (bool, error) { return false, nil },
+	})
+	assert.Equal(t, 0, r.exit, "declining the confirm prompt is not an error")
+	assert.Empty(t, svc.removeCalls, "nothing removed when user says N")
+	assert.Contains(t, r.stderr, "cancelled")
+}
+
 func TestRm_pickerCancelled(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}}}
-	r := runWithPicker(t, []string{"rm"}, nil, svc, func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
-		return nil, nil // user cancelled
+	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		picker: func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
+			return nil, nil // user cancelled
+		},
+		confirm: func(string) (bool, error) {
+			t.Fatal("confirm must not run when picker was cancelled")
+			return false, nil
+		},
 	})
 	assert.Equal(t, 0, r.exit, "cancelling the picker is not an error")
 	assert.Empty(t, svc.removeCalls, "nothing removed on cancel")
@@ -674,6 +701,19 @@ func TestRm_pickerNoWorkspaces(t *testing.T) {
 	})
 	assert.Equal(t, ExitNotFound, r.exit)
 	assert.Empty(t, svc.removeCalls)
+}
+
+func TestRm_byName_skipsConfirm(t *testing.T) {
+	svc := &fakeService{}
+	r := runWithDeps(t, []string{"rm", "x"}, nil, svc, depsOpts{
+		confirm: func(string) (bool, error) {
+			t.Fatal("confirm must not run when name is given explicitly")
+			return false, nil
+		},
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.removeCalls, 1)
+	assert.Equal(t, "x", svc.removeCalls[0].Name)
 }
 
 // --- go --------------------------------------------------------------

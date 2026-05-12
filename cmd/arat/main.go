@@ -2,11 +2,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/data-pata/arat/internal/cmd"
 	"github.com/data-pata/arat/internal/config"
@@ -16,6 +19,19 @@ import (
 	"github.com/data-pata/arat/internal/workspace"
 	"golang.org/x/term"
 )
+
+// confirm reads a y/N answer from stdin. Empty input or anything other than
+// "y" / "yes" (case-insensitive) returns false — destructive-by-Enter would
+// defeat the whole point. EOF is treated as a no, not an error.
+func confirm(prompt string) (bool, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	answer := strings.ToLower(strings.TrimSpace(line))
+	return answer == "y" || answer == "yes", nil
+}
 
 // defaultClaudeProjectsDir returns the location of Claude Code's per-cwd
 // session-history root. Honours $CLAUDE_CONFIG_DIR (the supported override),
@@ -66,6 +82,7 @@ func main() {
 		NewLinear: func() cmd.LinearClient { return linear.New() },
 		Cwd:       os.Getwd,
 		IsTTY:     func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
+		Confirm:   confirm,
 		TicketFlow: func(ctx context.Context, lr linear.Reader, team string, out io.Writer) (cmd.TicketFlowResult, error) {
 			res, err := tui.PickTicketFlow(ctx, lr, team, out)
 			if err != nil {
