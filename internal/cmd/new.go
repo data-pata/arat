@@ -18,6 +18,7 @@ func newNewCmd(s *state) *cobra.Command {
 		repos         []string
 		fromCurrent   bool
 		carryContext  bool
+		carrySession  string
 		codeWorkspace bool
 	)
 
@@ -137,6 +138,12 @@ default_repos and auto_repos_glob.
 				return mapNewError(err)
 			}
 
+			var carrySrc, carryDst string
+			var carryErr error
+			if carrySession != "" {
+				carrySrc, carryDst, carryErr = svc.MoveSessionFile(cmd.Context(), carrySession, ws.Path)
+			}
+
 			s.writer().JSONRecord(ws, func(out io.Writer) {
 				fmt.Fprintf(out, "%s\n", ws.Path)
 				fmt.Fprintf(s.deps.Stderr, "created workspace %s\n", ws.Name)
@@ -147,6 +154,13 @@ default_repos and auto_repos_glob.
 				for _, r := range ws.Repos {
 					fmt.Fprintf(s.deps.Stderr, "    %s → %s\n", r.Name, r.Branch)
 				}
+				if carrySession != "" {
+					if carryErr != nil {
+						fmt.Fprintf(s.deps.Stderr, "  ⚠ carry-session %s: %v\n", carrySession, carryErr)
+					} else {
+						fmt.Fprintf(s.deps.Stderr, "  carried session: %s → %s\n", carrySrc, carryDst)
+					}
+				}
 			})
 			return nil
 		},
@@ -156,6 +170,7 @@ default_repos and auto_repos_glob.
 	c.Flags().StringSliceVar(&repos, "repos", nil, "comma-separated repo names; defaults to default_repos + auto_repos_glob from config")
 	c.Flags().BoolVar(&fromCurrent, "from-current", false, "branch new worktrees off the parent workspace's feature branches (parent inferred from cwd) instead of origin/HEAD")
 	c.Flags().BoolVar(&carryContext, "carry-context", false, "seed the new CLAUDE.md with a 'Spun off from <parent>' header")
+	c.Flags().StringVar(&carrySession, "carry-session", "", "Claude Code session id (e.g. 2bba4a38-93e1-...) to move into the new workspace's project dir so /resume finds it after cd")
 	c.Flags().BoolVar(&codeWorkspace, "code-workspace", false, "generate a .code-workspace file (also enabled by config generate_code_workspace)")
 	return c
 }

@@ -44,6 +44,13 @@ type Service struct {
 	GenerateCodeWorkspace bool             // mirrors config.generate_code_workspace
 	Now                   func() time.Time // injected for deterministic CLAUDE.md timestamps
 	Git                   Git
+
+	// ClaudeProjectsDir is the path to Claude Code's per-cwd session-history
+	// root (`~/.claude/projects/` by default). When set, `AttachTicket` and
+	// `MoveSessionFile` migrate session jsonls alongside workspace
+	// renames/promotions. Leave empty to disable session migration entirely
+	// (used in tests that don't care about it).
+	ClaudeProjectsDir string
 }
 
 // ServiceOptions are the inputs to NewService. Mandatory: Root, WorkspacesDir,
@@ -60,6 +67,7 @@ type ServiceOptions struct {
 	GenerateCodeWorkspace bool
 	Now                   func() time.Time
 	Git                   Git
+	ClaudeProjectsDir     string
 }
 
 // NewService constructs a Service. Returns an error if a mandatory dep
@@ -86,6 +94,7 @@ func NewService(opts ServiceOptions) (*Service, error) {
 		GenerateCodeWorkspace: opts.GenerateCodeWorkspace,
 		Now:                   opts.Now,
 		Git:                   opts.Git,
+		ClaudeProjectsDir:     opts.ClaudeProjectsDir,
 	}, nil
 }
 

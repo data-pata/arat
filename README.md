@@ -79,11 +79,11 @@ default_team  = "ABC"
 | Command | Purpose |
 | --- | --- |
 | `arat ls [--json]` | List workspaces with `*dirty* *unpushed* *stashes:N*` markers. |
-| `arat new <name> [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. |
+| `arat new <name> [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--carry-session ID] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. `--carry-session` moves a Claude Code session jsonl into the new workspace's project dir so `/resume` finds it after `cd`. |
 | `arat rm <name> [--force] [--keep-branches]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed/stashed unless `--force`. |
 | `arat go [name]` | Print path to a workspace. With shell wrapper, `cd`s into it. No name → interactive picker. |
 | `arat ticket create -t <title> [--team] [--project] [--state] [-d desc] [-l label]` | Create a Linear issue via `linear issue create --no-interactive`. |
-| `arat ticket attach <name> <ticket>` | Attach a ticket to a ticketless workspace; renames dirs/branches and updates CLAUDE.md. |
+| `arat ticket attach <name> <ticket>` | Attach a ticket to a ticketless workspace; renames dirs/branches, updates CLAUDE.md, and migrates `~/.claude/projects/<encoded>` session dirs to the new path. |
 | `arat repo add [--workspace NAME] [--base REF] <repo>...` | Add one or more git worktrees to an existing multi-repo workspace, on its existing feature branch. Workspace inferred from cwd if `--workspace` omitted. |
 | `arat note [name] <text...>` | Post a comment on the workspace's Linear ticket. Workspace inferred from cwd if name omitted. |
 | `arat init <bash\|zsh\|fish>` | Print shell integration. |

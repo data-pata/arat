@@ -37,8 +37,9 @@ type AttachWarning struct {
 // non-fatal warnings (e.g. a worktree that had been moved off the original
 // branch and so couldn't be auto-renamed).
 type AttachResult struct {
-	Workspace *Workspace
-	Warnings  []AttachWarning
+	Workspace        *Workspace
+	Warnings         []AttachWarning
+	SessionWarnings  []SessionMoveWarning
 }
 
 // AttachTicket performs the rename/repair/edit. See type docs above.
@@ -131,11 +132,21 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 		warnings = append(warnings, AttachWarning{Reason: "CLAUDE.md update failed: " + err.Error()})
 	}
 
+	// 5. Migrate Claude Code session history dirs to the new cwd.
+	//    Workspace move on disk is already complete; this only renames
+	//    ~/.claude/projects/<encoded> entries so /resume finds your chats
+	//    after the workspace dir's been renamed.
+	sessionWarnings := s.MoveSessionsForRename(current.Path, newPath)
+
 	updated, err := s.Get(ctx, newDirName)
 	if err != nil {
 		return nil, err
 	}
-	return &AttachResult{Workspace: updated, Warnings: warnings}, nil
+	return &AttachResult{
+		Workspace:       updated,
+		Warnings:        warnings,
+		SessionWarnings: sessionWarnings,
+	}, nil
 }
 
 // updateClaudeMDForAttach replaces the file's header section (everything

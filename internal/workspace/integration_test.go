@@ -386,8 +386,23 @@ func TestAttachTicket_happy(t *testing.T) {
 	root := setupRoot(t, "repo-a", "repo-b")
 	svc := newSvc(t, root)
 
+	// Wire a fake Claude projects dir so we can verify session migration
+	// happens as part of attach, end-to-end.
+	claudeProjects := filepath.Join(t.TempDir(), "projects")
+	require.NoError(t, os.MkdirAll(claudeProjects, 0o755))
+	svc.ClaudeProjectsDir = claudeProjects
+
 	_, err := svc.New(t.Context(), NewOptions{ShortName: "myfeat", Repos: []string{"repo-a", "repo-b"}})
 	require.NoError(t, err)
+
+	// Simulate two Claude sessions that ran while the workspace was named
+	// "myfeat": one at the workspace root, one inside the repo-a worktree.
+	oldRootEnc := EncodeCwdAsProjectDir(filepath.Join(svc.WorkspacesDir, "myfeat"))
+	oldRepoAEnc := EncodeCwdAsProjectDir(filepath.Join(svc.WorkspacesDir, "myfeat", "repo-a"))
+	for _, dir := range []string{oldRootEnc, oldRepoAEnc} {
+		require.NoError(t, os.MkdirAll(filepath.Join(claudeProjects, dir), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(claudeProjects, dir, "session.jsonl"), []byte(`{}`), 0o600))
+	}
 	// Append user content under H2; we want it preserved.
 	mdPath := filepath.Join(svc.WorkspacesDir, "myfeat", "CLAUDE.md")
 	original, err := os.ReadFile(mdPath)
@@ -398,8 +413,21 @@ func TestAttachTicket_happy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Empty(t, res.Warnings)
+	assert.Empty(t, res.SessionWarnings)
 	assert.Equal(t, "abc-99--myfeat", res.Workspace.Name)
 	assert.Equal(t, "abc-99", res.Workspace.Ticket)
+
+	// Session dirs followed the rename.
+	newRootEnc := EncodeCwdAsProjectDir(filepath.Join(svc.WorkspacesDir, "abc-99--myfeat"))
+	newRepoAEnc := EncodeCwdAsProjectDir(filepath.Join(svc.WorkspacesDir, "abc-99--myfeat", "repo-a"))
+	for _, dir := range []string{newRootEnc, newRepoAEnc} {
+		_, err := os.Stat(filepath.Join(claudeProjects, dir, "session.jsonl"))
+		assert.NoError(t, err, "expected jsonl at %s", dir)
+	}
+	for _, dir := range []string{oldRootEnc, oldRepoAEnc} {
+		_, err := os.Stat(filepath.Join(claudeProjects, dir))
+		assert.True(t, os.IsNotExist(err), "expected old project dir gone: %s", dir)
+	}
 
 	// Old dir gone, new dir present
 	assert.False(t, dirExists(filepath.Join(svc.WorkspacesDir, "myfeat")))

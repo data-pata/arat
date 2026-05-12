@@ -58,6 +58,13 @@ those manually.
 			for _, w := range res.Warnings {
 				fmt.Fprintf(s.deps.Stderr, "  ⚠ %s: %s\n", w.Repo, w.Reason)
 			}
+			for _, w := range res.SessionWarnings {
+				where := w.Dir
+				if w.File != "" {
+					where = w.Dir + "/" + w.File
+				}
+				fmt.Fprintf(s.deps.Stderr, "  ⚠ claude session %s: %s\n", where, w.Reason)
+			}
 			return nil
 		},
 	}

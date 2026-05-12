@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/data-pata/arat/internal/cmd"
 	"github.com/data-pata/arat/internal/config"
@@ -15,6 +16,21 @@ import (
 	"github.com/data-pata/arat/internal/workspace"
 	"golang.org/x/term"
 )
+
+// defaultClaudeProjectsDir returns the location of Claude Code's per-cwd
+// session-history root. Honours $CLAUDE_CONFIG_DIR (the supported override),
+// falls back to ~/.claude. Returns "" when no home is known, which makes
+// the workspace service treat session migration as a no-op rather than fail.
+func defaultClaudeProjectsDir() string {
+	if v := os.Getenv("CLAUDE_CONFIG_DIR"); v != "" {
+		return filepath.Join(v, "projects")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects")
+}
 
 func main() {
 	deps := cmd.Deps{
@@ -31,6 +47,7 @@ func main() {
 				DefaultRepos:          cfg.DefaultRepos,
 				AutoReposGlob:         cfg.AutoReposGlob,
 				GenerateCodeWorkspace: cfg.GenerateCodeWorkspace,
+				ClaudeProjectsDir:     defaultClaudeProjectsDir(),
 				Git:                   git.New(),
 			})
 			if err != nil {

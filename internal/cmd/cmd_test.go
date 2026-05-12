@@ -33,13 +33,22 @@ type fakeService struct {
 	addReposErr      error
 	candidatesResult []workspace.RepoCandidate
 	candidatesErr    error
+	moveSessionSrc   string
+	moveSessionDst   string
+	moveSessionErr   error
 
-	getCalls         []string
-	newCalls         []workspace.NewOptions
-	removeCalls      []workspace.RemoveOptions
-	attachCalls      []workspace.AttachOptions
-	addReposCalls    []workspace.AddReposOptions
-	candidatesCalled int
+	getCalls            []string
+	newCalls            []workspace.NewOptions
+	removeCalls         []workspace.RemoveOptions
+	attachCalls         []workspace.AttachOptions
+	addReposCalls       []workspace.AddReposOptions
+	candidatesCalled    int
+	moveSessionCalls    []moveSessionCall
+}
+
+type moveSessionCall struct {
+	SessionID string
+	TargetWS  string
 }
 
 func (f *fakeService) List(_ context.Context) ([]workspace.Workspace, error) {
@@ -68,6 +77,10 @@ func (f *fakeService) AddRepos(_ context.Context, opts workspace.AddReposOptions
 func (f *fakeService) ListRepoCandidates() ([]workspace.RepoCandidate, error) {
 	f.candidatesCalled++
 	return f.candidatesResult, f.candidatesErr
+}
+func (f *fakeService) MoveSessionFile(_ context.Context, sessionID, target string) (string, string, error) {
+	f.moveSessionCalls = append(f.moveSessionCalls, moveSessionCall{SessionID: sessionID, TargetWS: target})
+	return f.moveSessionSrc, f.moveSessionDst, f.moveSessionErr
 }
 
 type runResult struct {
@@ -250,6 +263,37 @@ func TestNew_unknownRepo(t *testing.T) {
 	svc := &fakeService{newErr: fmt.Errorf("%w: missing not at root", workspace.ErrNotFound)}
 	r := run(t, []string{"new", "x", "--no-ticket"}, nil, svc)
 	assert.Equal(t, ExitNotFound, r.exit)
+}
+
+func TestNew_carrySession_passesIDAndReportsMove(t *testing.T) {
+	svc := &fakeService{
+		newResult:      &workspace.Workspace{Name: "x", Path: "/p"},
+		moveSessionSrc: "/src/abc.jsonl",
+		moveSessionDst: "/dst/abc.jsonl",
+	}
+	r := run(t, []string{"new", "x", "--no-ticket", "--carry-session", "abc-123"}, nil, svc)
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.moveSessionCalls, 1)
+	assert.Equal(t, "abc-123", svc.moveSessionCalls[0].SessionID)
+	assert.Equal(t, "/p", svc.moveSessionCalls[0].TargetWS)
+	assert.Contains(t, r.stderr, "carried session: /src/abc.jsonl → /dst/abc.jsonl")
+}
+
+func TestNew_carrySession_failureIsReportedAsWarning(t *testing.T) {
+	svc := &fakeService{
+		newResult:      &workspace.Workspace{Name: "x", Path: "/p"},
+		moveSessionErr: fmt.Errorf("%w: session", workspace.ErrNotFound),
+	}
+	r := run(t, []string{"new", "x", "--no-ticket", "--carry-session", "abc-123"}, nil, svc)
+	assert.Equal(t, 0, r.exit, "carry-session failure does not abort `new`")
+	assert.Contains(t, r.stderr, "⚠ carry-session abc-123")
+}
+
+func TestNew_carrySession_notInvokedWhenFlagAbsent(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
+	r := run(t, []string{"new", "x", "--no-ticket"}, nil, svc)
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Empty(t, svc.moveSessionCalls)
 }
 
 func TestNew_invalidShortNameFromService(t *testing.T) {
@@ -725,6 +769,18 @@ func TestTicketAttach_warningsPrinted(t *testing.T) {
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "abc-1"}, nil, svc, depsOpts{})
 	assert.Equal(t, 0, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "repo-b: off branch")
+}
+
+func TestTicketAttach_sessionWarningsPrinted(t *testing.T) {
+	svc := &fakeService{attachResult: &workspace.AttachResult{
+		Workspace: &workspace.Workspace{Name: "abc-1--x", Path: "/p", Ticket: "abc-1"},
+		SessionWarnings: []workspace.SessionMoveWarning{
+			{Dir: "-some-proj", File: "dup.jsonl", Reason: "destination already has a file with the same name"},
+		},
+	}}
+	r := runWithDeps(t, []string{"ticket", "attach", "x", "abc-1"}, nil, svc, depsOpts{})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Contains(t, r.stderr, "claude session -some-proj/dup.jsonl")
 }
 
 func TestTicketAttach_notFound(t *testing.T) {

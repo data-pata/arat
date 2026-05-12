@@ -85,6 +85,7 @@ type Service interface {
 	AttachTicket(ctx context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error)
 	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
 	ListRepoCandidates() ([]workspace.RepoCandidate, error)
+	MoveSessionFile(ctx context.Context, sessionID, targetWorkspacePath string) (srcPath, dstPath string, err error)
 }
 
 // Root builds the root cobra command.
