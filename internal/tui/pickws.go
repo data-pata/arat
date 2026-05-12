@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -19,11 +20,21 @@ import (
 // path. Reads from /dev/tty if available (so it works inside `$( ... )`).
 // Returns the chosen workspace, or nil if the user cancelled (q / Esc /
 // Ctrl+C).
+//
+// When fzf is on PATH we delegate to it: fzf draws straight to /dev/tty so
+// colors always work, even when the shell wrapper captures stdout via
+// $(...). Without fzf, falls back to the in-process bubbletea picker.
 func PickWorkspace(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error) {
 	if len(items) == 0 {
 		return nil, fmt.Errorf("no workspaces to pick from")
 	}
+	if path, err := exec.LookPath("fzf"); err == nil {
+		return pickWorkspaceFzf(ctx, path, items)
+	}
+	return pickWorkspaceBubble(ctx, items, out)
+}
 
+func pickWorkspaceBubble(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error) {
 	listItems := make([]list.Item, len(items))
 	for i, ws := range items {
 		listItems[i] = wsItem(ws)

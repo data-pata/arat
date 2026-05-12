@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/spf13/cobra"
@@ -85,6 +86,16 @@ func (s *state) runPicker(cmd *cobra.Command, svc Service) error {
 	if len(items) == 0 {
 		return &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
 	}
+	// Most-recently-touched first, name asc as tiebreak. mtime on the
+	// workspace dir is a cheap proxy for "last visited" — it bumps on most
+	// activity (new file at the top level, branch checkout, etc.) without us
+	// having to keep a separate visit log.
+	sort.SliceStable(items, func(i, j int) bool {
+		if !items[i].Created.Equal(items[j].Created) {
+			return items[i].Created.After(items[j].Created)
+		}
+		return items[i].Name < items[j].Name
+	})
 	chosen, err := s.deps.PickWorkspace(cmd.Context(), items, s.deps.Stderr)
 	if err != nil {
 		return &exitErr{code: ExitExternal, err: err}
