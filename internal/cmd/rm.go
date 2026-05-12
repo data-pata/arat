@@ -15,11 +15,14 @@ func newRmCmd(s *state) *cobra.Command {
 	)
 
 	c := &cobra.Command{
-		Use:     "rm <name>",
+		Use:     "rm [name]",
 		Aliases: []string{"kill"},
 		Short:   "Remove a workspace and its worktrees",
 		Long: `Remove a workspace, its git worktrees, and (by default) the feature
 branches in each canonical repo.
+
+Without a name, opens an interactive picker (fzf when available, with a
+bubbletea fallback) sorted by recency — same picker as "arat go".
 
 By default, refuses if any worktree has uncommitted changes or unpushed commits
 — pass --force to override. Use --keep-branches to remove the worktrees but
@@ -31,10 +34,11 @@ canonical clone where the stashes can still be recovered.
 
 Returns exit code 4 (precondition) when safety checks trip without --force.
 `,
-		Example: `  arat rm abc-123--postal-fix
+		Example: `  arat rm                       # interactive picker
+  arat rm abc-123--postal-fix
   arat rm postal-fix --force
   arat rm postal-fix --keep-branches`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := s.loadConfig()
 			if err != nil {
@@ -42,8 +46,22 @@ Returns exit code 4 (precondition) when safety checks trip without --force.
 			}
 			svc := s.deps.NewService(cfg)
 
+			var name string
+			if len(args) == 1 {
+				name = args[0]
+			} else {
+				chosen, err := s.pickWorkspaceInteractive(cmd, svc)
+				if err != nil {
+					return err
+				}
+				if chosen == nil {
+					return nil // user cancelled
+				}
+				name = chosen.Name
+			}
+
 			res, err := svc.Remove(cmd.Context(), workspace.RemoveOptions{
-				Name:         args[0],
+				Name:         name,
 				Force:        force,
 				KeepBranches: keepBranches,
 			})
@@ -51,7 +69,7 @@ Returns exit code 4 (precondition) when safety checks trip without --force.
 				return mapRmError(err)
 			}
 
-			fmt.Fprintf(s.deps.Stderr, "removed workspace %s\n", args[0])
+			fmt.Fprintf(s.deps.Stderr, "removed workspace %s\n", name)
 			if res != nil {
 				for _, sr := range res.StashedRepos {
 					fmt.Fprintf(s.deps.Stderr,

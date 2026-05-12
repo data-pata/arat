@@ -65,26 +65,43 @@ default today.
 	return c
 }
 
-// runPicker handles the no-name code path: list workspaces and let the user
-// pick one via the injected picker. If the user cancels, no path is printed
-// and the command exits successfully.
+// runPicker handles the no-name code path for `arat go`: pick a workspace
+// and print its path on stdout. Cancel = success with no output.
 func (s *state) runPicker(cmd *cobra.Command, svc Service) error {
-	if s.deps.PickWorkspace == nil {
-		return &exitErr{code: ExitUsage, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
+	chosen, err := s.pickWorkspaceInteractive(cmd, svc)
+	if err != nil {
+		return err
 	}
-	// ListShallow skips per-repo git inspection so the picker appears in
-	// well under a second even when the user has many workspaces with many
-	// worktrees. The trade-off is that the picker can't show dirty /
-	// unpushed / stash counts — `arat ls` is the place for those.
+	if chosen == nil {
+		return nil // user cancelled
+	}
+	fmt.Fprintln(s.deps.Stdout, chosen.Path)
+	return nil
+}
+
+// pickWorkspaceInteractive loads the shallow workspace list, sorts it by
+// recency, and delegates to the injected picker (fzf when available, with a
+// bubbletea fallback). Returns nil when the user cancels. Shared between
+// `arat go` and `arat rm` so they behave identically in picker mode — same
+// sort, same "no workspaces yet" error, same cancel-as-success semantics.
+//
+// ListShallow skips per-repo git inspection so the picker appears in well
+// under a second even when the user has many workspaces with many worktrees.
+// The trade-off is that the picker can't show dirty / unpushed / stash
+// counts — `arat ls` is the place for those.
+func (s *state) pickWorkspaceInteractive(cmd *cobra.Command, svc Service) (*workspace.Workspace, error) {
+	if s.deps.PickWorkspace == nil {
+		return nil, &exitErr{code: ExitUsage, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
+	}
 	items, err := svc.ListShallow(cmd.Context())
 	if err != nil {
 		if errors.Is(err, workspace.ErrNoWorkspacesDir) {
-			return &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
+			return nil, &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
 		}
-		return &exitErr{code: ExitExternal, err: err}
+		return nil, &exitErr{code: ExitExternal, err: err}
 	}
 	if len(items) == 0 {
-		return &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
+		return nil, &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
 	}
 	// Most-recently-touched first, name asc as tiebreak. mtime on the
 	// workspace dir is a cheap proxy for "last visited" — it bumps on most
@@ -98,11 +115,7 @@ func (s *state) runPicker(cmd *cobra.Command, svc Service) error {
 	})
 	chosen, err := s.deps.PickWorkspace(cmd.Context(), items, s.deps.Stderr)
 	if err != nil {
-		return &exitErr{code: ExitExternal, err: err}
+		return nil, &exitErr{code: ExitExternal, err: err}
 	}
-	if chosen == nil {
-		return nil // user cancelled
-	}
-	fmt.Fprintln(s.deps.Stdout, chosen.Path)
-	return nil
+	return chosen, nil
 }

@@ -645,6 +645,37 @@ func TestRm_noStashedReposNoNote(t *testing.T) {
 	assert.NotContains(t, r.stderr, "preserved", "no stashed repos -> no note line")
 }
 
+func TestRm_pickerHappy(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}, {Name: "b", Path: "/b"}}}
+	r := runWithPicker(t, []string{"rm"}, nil, svc, func(_ context.Context, items []workspace.Workspace, _ io.Writer) (*workspace.Workspace, error) {
+		require.Len(t, items, 2)
+		return &workspace.Workspace{Name: "b", Path: "/b"}, nil
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.removeCalls, 1)
+	assert.Equal(t, "b", svc.removeCalls[0].Name)
+	assert.Contains(t, r.stderr, "removed workspace b")
+}
+
+func TestRm_pickerCancelled(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}}}
+	r := runWithPicker(t, []string{"rm"}, nil, svc, func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
+		return nil, nil // user cancelled
+	})
+	assert.Equal(t, 0, r.exit, "cancelling the picker is not an error")
+	assert.Empty(t, svc.removeCalls, "nothing removed on cancel")
+}
+
+func TestRm_pickerNoWorkspaces(t *testing.T) {
+	svc := &fakeService{listErr: fmt.Errorf("%w: x", workspace.ErrNoWorkspacesDir)}
+	r := runWithPicker(t, []string{"rm"}, nil, svc, func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
+		t.Fatal("picker must not be called when there are no workspaces")
+		return nil, nil
+	})
+	assert.Equal(t, ExitNotFound, r.exit)
+	assert.Empty(t, svc.removeCalls)
+}
+
 // --- go --------------------------------------------------------------
 
 func TestGo_byName(t *testing.T) {

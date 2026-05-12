@@ -80,7 +80,7 @@ default_team  = "ABC"
 | --- | --- |
 | `arat ls [--json]` | List workspaces with `*dirty* *unpushed* *stashes:N*` markers. |
 | `arat new <name> [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--carry-session ID] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. `--carry-session` moves a Claude Code session jsonl into the new workspace's project dir so `/resume` finds it after `cd`. |
-| `arat rm <name> [--force] [--keep-branches]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed/stashed unless `--force`. |
+| `arat rm [name] [--force] [--keep-branches]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed unless `--force`. No name → interactive picker. |
 | `arat go [name]` | Print path to a workspace. With shell wrapper, `cd`s into it. No name → interactive picker. |
 | `arat ticket create -t <title> [--team] [--project] [--state] [-d desc] [-l label]` | Create a Linear issue via `linear issue create --no-interactive`. |
 | `arat ticket attach <name> <ticket>` | Attach a ticket to a ticketless workspace; renames dirs/branches, updates CLAUDE.md, and migrates `~/.claude/projects/<encoded>` session dirs to the new path. |
