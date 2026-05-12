@@ -8,6 +8,8 @@ import (
 
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/data-pata/arat/internal/linear"
 )
@@ -231,6 +233,16 @@ func pickIssue(ctx context.Context, issues []linear.Issue, out io.Writer) (*line
 // returned cleanup closes the /dev/tty file descriptor; callers must defer
 // it. cleanup is non-nil even when /dev/tty couldn't be opened.
 func programOpts(ctx context.Context, out io.Writer) ([]tea.ProgramOption, func()) {
+	// Point lipgloss's default renderer at our output writer so it probes the
+	// right fd for color support. The shell wrapper (`arat init <shell>`) runs
+	// `arat go` inside $(...), which makes stdout a pipe — and lipgloss's
+	// default renderer probes os.Stdout, so it would decide "not a terminal"
+	// and strip all color. Mutating the existing renderer's output (rather
+	// than SetDefaultRenderer) is required because package-level styles and
+	// bubbles' internal styles bind to the default renderer pointer at
+	// NewStyle() time; replacing the pointer leaves them stale.
+	lipgloss.DefaultRenderer().SetOutput(termenv.NewOutput(out))
+
 	opts := []tea.ProgramOption{
 		tea.WithOutput(out),
 		tea.WithContext(ctx),

@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -39,18 +38,8 @@ func PickWorkspace(ctx context.Context, items []workspace.Workspace, out io.Writ
 
 	m := &pickModel{list: l}
 
-	opts := []tea.ProgramOption{
-		tea.WithOutput(out),
-		tea.WithContext(ctx),
-	}
-	// When stdout is captured (e.g. shell `$(arat go)`) the user's tty input
-	// still comes through /dev/tty. Use it explicitly so the picker is
-	// usable inside command substitution.
-	if tty, err := os.Open("/dev/tty"); err == nil {
-		opts = append(opts, tea.WithInput(tty))
-		defer tty.Close()
-	}
-
+	opts, cleanup := programOpts(ctx, out)
+	defer cleanup()
 	prog := tea.NewProgram(m, opts...)
 	finalModel, err := prog.Run()
 	if err != nil {
