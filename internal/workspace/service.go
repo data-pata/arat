@@ -132,6 +132,33 @@ func (s *Service) List(ctx context.Context) ([]Workspace, error) {
 	return out, nil
 }
 
+// ListShallow is List without per-repo git inspection. Returns workspaces
+// with their Repos slice empty. Used by the interactive picker, where full
+// inspection (dirty / unpushed / stash counts on every worktree) would
+// otherwise add a multi-second pause before the picker appears.
+func (s *Service) ListShallow(_ context.Context) ([]Workspace, error) {
+	entries, err := os.ReadDir(s.WorkspacesDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNoWorkspacesDir, s.WorkspacesDir)
+		}
+		return nil, fmt.Errorf("read %s: %w", s.WorkspacesDir, err)
+	}
+	out := make([]Workspace, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		var modTime time.Time
+		if info, err := e.Info(); err == nil {
+			modTime = info.ModTime()
+		}
+		out = append(out, s.hydrateShallow(e.Name(), modTime))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
 // Get returns the workspace with the given dir name, fully hydrated. Returns
 // ErrNotFound if it doesn't exist.
 func (s *Service) Get(ctx context.Context, name string) (*Workspace, error) {
@@ -177,6 +204,37 @@ func (e *ErrPrecondition) Error() string {
 }
 
 func (s *Service) hydrate(ctx context.Context, name string, created time.Time) (Workspace, error) {
+	ws := s.hydrateShallow(name, created)
+
+	// Single-repo workspace: the workspace dir itself is a git worktree.
+	// Don't recurse into it (its subdirs aren't separate worktrees).
+	if s.Git.IsWorktree(ctx, ws.Path) {
+		ws.Repos = append(ws.Repos, s.inspectAt(ctx, "", ws.Path))
+		return ws, nil
+	}
+
+	subs, err := os.ReadDir(ws.Path)
+	if err != nil {
+		return ws, fmt.Errorf("read %s: %w", ws.Path, err)
+	}
+	for _, sub := range subs {
+		if !sub.IsDir() || strings.HasPrefix(sub.Name(), ".") || sub.Name() == "claude_workspace" {
+			continue
+		}
+		repoPath := filepath.Join(ws.Path, sub.Name())
+		if !s.Git.IsWorktree(ctx, repoPath) {
+			continue
+		}
+		ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), repoPath))
+	}
+	return ws, nil
+}
+
+// hydrateShallow fills in everything that can be derived from the workspace
+// dir name alone — no git invocations, no per-repo inspection. Used by the
+// picker, which only needs name + ticket and wants sub-second load even when
+// the user has many workspaces with many repos.
+func (s *Service) hydrateShallow(name string, created time.Time) Workspace {
 	full := filepath.Join(s.WorkspacesDir, name)
 	ticket, short := ParseName(name, s.TicketRE)
 	ws := Workspace{
@@ -189,29 +247,7 @@ func (s *Service) hydrate(ctx context.Context, name string, created time.Time) (
 	if ticket != "" && s.TicketURL != "" {
 		ws.TicketURL = renderTicketURL(s.TicketURL, ticket)
 	}
-
-	// Single-repo workspace: the workspace dir itself is a git worktree.
-	// Don't recurse into it (its subdirs aren't separate worktrees).
-	if s.Git.IsWorktree(ctx, full) {
-		ws.Repos = append(ws.Repos, s.inspectAt(ctx, "", full))
-		return ws, nil
-	}
-
-	subs, err := os.ReadDir(full)
-	if err != nil {
-		return ws, fmt.Errorf("read %s: %w", full, err)
-	}
-	for _, sub := range subs {
-		if !sub.IsDir() || strings.HasPrefix(sub.Name(), ".") || sub.Name() == "claude_workspace" {
-			continue
-		}
-		repoPath := filepath.Join(full, sub.Name())
-		if !s.Git.IsWorktree(ctx, repoPath) {
-			continue
-		}
-		ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), repoPath))
-	}
-	return ws, nil
+	return ws
 }
 
 // inspectAt builds a RepoStatus for a worktree. If name is empty, it derives

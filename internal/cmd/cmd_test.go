@@ -54,6 +54,9 @@ type moveSessionCall struct {
 func (f *fakeService) List(_ context.Context) ([]workspace.Workspace, error) {
 	return f.listResult, f.listErr
 }
+func (f *fakeService) ListShallow(_ context.Context) ([]workspace.Workspace, error) {
+	return f.listResult, f.listErr
+}
 func (f *fakeService) Get(_ context.Context, name string) (*workspace.Workspace, error) {
 	f.getCalls = append(f.getCalls, name)
 	return f.getResult, f.getErr

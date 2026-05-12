@@ -71,7 +71,11 @@ func (s *state) runPicker(cmd *cobra.Command, svc Service) error {
 	if s.deps.PickWorkspace == nil {
 		return &exitErr{code: ExitUsage, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
 	}
-	items, err := svc.List(cmd.Context())
+	// ListShallow skips per-repo git inspection so the picker appears in
+	// well under a second even when the user has many workspaces with many
+	// worktrees. The trade-off is that the picker can't show dirty /
+	// unpushed / stash counts — `arat ls` is the place for those.
+	items, err := svc.ListShallow(cmd.Context())
 	if err != nil {
 		if errors.Is(err, workspace.ErrNoWorkspacesDir) {
 			return &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
