@@ -13,9 +13,9 @@ func TestEncodeCwdAsProjectDir(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"/home/u/git/kivra/feat/foo", "-home-u-git-kivra-feat-foo"},
+		{"/home/u/git/myorg/feat/foo", "-home-u-git-myorg-feat-foo"},
 		{"/home/u/.claude", "-home-u--claude"},
-		{"/home/u/git/kivra/feat/abc-1--xyz", "-home-u-git-kivra-feat-abc-1--xyz"},
+		{"/home/u/git/myorg/feat/abc-1--xyz", "-home-u-git-myorg-feat-abc-1--xyz"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -166,8 +166,8 @@ func TestMoveSessionFile_movesFromAnyDirToTargetEncoded(t *testing.T) {
 	target := filepath.Join(wsDir, "abc-1--feat")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 
-	// Session originally created when the user was in `~/git/kivra` (parent dir).
-	srcEnc := EncodeCwdAsProjectDir("/home/u/git/kivra")
+	// Session originally created when the user was in `~/git/myorg` (parent dir).
+	srcEnc := EncodeCwdAsProjectDir("/home/u/git/myorg")
 	dstEnc := EncodeCwdAsProjectDir(target)
 	root := filepath.Join(t.TempDir(), "projects")
 	require.NoError(t, os.MkdirAll(filepath.Join(root, srcEnc), 0o755))
@@ -199,7 +199,7 @@ func TestMoveSessionFile_errIfDestinationExists(t *testing.T) {
 	target := filepath.Join(wsDir, "ws")
 	require.NoError(t, os.MkdirAll(target, 0o755))
 
-	srcEnc := EncodeCwdAsProjectDir("/home/u/git/kivra")
+	srcEnc := EncodeCwdAsProjectDir("/home/u/git/myorg")
 	dstEnc := EncodeCwdAsProjectDir(target)
 	root := filepath.Join(t.TempDir(), "projects")
 	require.NoError(t, os.MkdirAll(filepath.Join(root, srcEnc), 0o755))

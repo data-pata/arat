@@ -7,11 +7,11 @@ that lets you keep many parallel workstreams isolated on disk, jump between
 them in one keystroke, and tie each to a ticket without ceremony.
 
 ```text
-arat new offers-fix --ticket abc-123    # creates feat/abc-123--offers-fix
+arat new widget-fix --ticket abc-123    # creates feat/abc-123--widget-fix
                                         # with worktrees for every repo + CLAUDE.md
 arat go                                 # interactive picker → cd into chosen ws
 arat note "shipped a workaround"        # comments on the linked Linear issue
-arat rm offers-fix                      # cleans up worktrees + branches
+arat rm widget-fix                      # cleans up worktrees + branches
 ```
 
 `arat` is a generic tool — the org-specific bits (paths, branch prefix,
@@ -111,15 +111,15 @@ to stderr.
 
 ```
 <workspaces_dir>/
-└── abc-123--offers-fix/
+└── abc-123--widget-fix/
     ├── CLAUDE.md                 # H1, ticket link, branch, repos; user-editable below ## Scope
     ├── claude_workspace/         # gitignored scratch dir; Claude can dump anything here
     ├── core-mono/                # git worktree
     ├── ui-app/                   # git worktree
-    └── abc-123--offers-fix.code-workspace   # if generate_code_workspace
+    └── abc-123--widget-fix.code-workspace   # if generate_code_workspace
 ```
 
-Branch in each worktree: `me--offers-fix--abc-123` (using the configured
+Branch in each worktree: `me--widget-fix--abc-123` (using the configured
 `branch_prefix`).
 
 ## Phase 7 extras

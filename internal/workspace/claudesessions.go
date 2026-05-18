@@ -13,7 +13,7 @@ import (
 
 // EncodeCwdAsProjectDir mirrors Claude Code's ~/.claude/projects/<dir>
 // scheme: starting from an absolute cwd, every '/' and '.' becomes '-'.
-// So `/home/u/git/kivra/feat/foo` → `-home-u-git-kivra-feat-foo` and
+// So `/home/u/git/myorg/feat/foo` → `-home-u-git-myorg-feat-foo` and
 // `/home/u/.claude` → `-home-u--claude`.
 func EncodeCwdAsProjectDir(cwd string) string {
 	r := strings.NewReplacer("/", "-", ".", "-")
@@ -86,7 +86,7 @@ func (s *Service) MoveSessionsForRename(oldPath, newPath string) []SessionMoveWa
 // MoveSessionFile relocates a single session jsonl (identified by sessionID,
 // which is its filename minus the .jsonl extension) into the project dir
 // matching targetWorkspacePath. Used by `arat new --carry-session` to drag a
-// chat that started in some other cwd (e.g. ~/git/kivra) into a freshly
+// chat that started in some other cwd (e.g. ~/git/myorg) into a freshly
 // created workspace.
 //
 // Returns (sourcePath, destPath, nil) on success.

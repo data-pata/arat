@@ -55,7 +55,7 @@ func TestIssueCreate_argvShape(t *testing.T) {
 		Team:    "ABC",
 		Project: "Side quest",
 		State:   "Backlog",
-		Labels:  []string{"BE", "offers"},
+		Labels:  []string{"BE", "api"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "ABC-9999", res.ID)
@@ -67,7 +67,7 @@ func TestIssueCreate_argvShape(t *testing.T) {
 		"--project", "Side quest",
 		"--state", "Backlog",
 		"--label", "BE",
-		"--label", "offers",
+		"--label", "api",
 	}, rr.calls[0])
 }
 
