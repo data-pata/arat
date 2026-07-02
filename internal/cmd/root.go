@@ -60,10 +60,11 @@ type TicketFlow func(ctx context.Context, lc linear.Reader, team string, out io.
 // TicketFlowResult: a parallel of tui.TicketFlowResult, but lifted to the
 // cmd package so cmd code doesn't import tui directly.
 type TicketFlowResult struct {
-	Cancelled bool
-	Skip      bool
-	Ticket    string // when non-empty, attach this ticket
-	Hint      string // when non-empty, print this to stderr (and skip)
+	Cancelled      bool
+	Skip           bool
+	Ticket         string // when non-empty, attach this existing ticket
+	NewTitle       string // when non-empty, cmd creates a new ticket with this title
+	NewDescription string // optional description paired with NewTitle
 }
 
 // RepoFlow is the interactive multi-select repo picker. Returns either the

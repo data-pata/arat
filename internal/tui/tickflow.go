@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
@@ -21,52 +24,59 @@ const (
 	ActionCancelled TicketAction = iota // user pressed q/Esc/Ctrl+C
 	ActionSkip                          // proceed without a ticket
 	ActionPick                          // pick from an existing list
-	ActionCreate                        // tell the user to run `arat ticket create` first
+	ActionCreate                        // create a new ticket from a typed title
 )
 
 // TicketFlowResult is the outcome of the whole interactive ticket flow.
 type TicketFlowResult struct {
-	Action   TicketAction
-	IssueID  string // populated when Action == ActionPick and a ticket was selected
-	HintText string // when Action == ActionCreate, a one-line hint to print to stderr
+	Action         TicketAction
+	IssueID        string // populated when Action == ActionPick and a ticket was selected
+	NewTitle       string // populated when Action == ActionCreate; cmd will shell out to linear
+	NewDescription string // optional description supplied alongside NewTitle
 }
 
 // issuePicker is the type of pickIssue, lifted out for tests.
 type issuePicker func(ctx context.Context, issues []linear.Issue, out io.Writer) (*linear.Issue, error)
 
+// composeResult is what the title+description prompt returns.
+type composeResult struct {
+	Title       string
+	Description string
+	Cancelled   bool
+}
+
+// composePrompt is the type of askCompose, lifted out for tests.
+type composePrompt func(ctx context.Context, out io.Writer) (composeResult, error)
+
 // PickTicketFlow runs the full interactive ticket flow. See dispatch for the
-// state-machine; this thin entrypoint wires the real action-chooser and
-// issue picker.
+// state-machine; this thin entrypoint wires the real action-chooser, issue
+// picker, and compose prompt.
 func PickTicketFlow(ctx context.Context, lc linear.Reader, team string, out io.Writer) (TicketFlowResult, error) {
 	action, err := pickTicketAction(ctx, out)
 	if err != nil {
 		return TicketFlowResult{}, err
 	}
-	return dispatchAction(ctx, action, lc, team, pickIssue, out)
+	return dispatchAction(ctx, action, lc, team, pickIssue, askCompose, out)
 }
 
 // dispatchAction is the pure (testable) state-machine that turns a chosen
-// TicketAction into a final result, fetching issues and consulting the
-// issue picker as needed.
-func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, team string, pick issuePicker, out io.Writer) (TicketFlowResult, error) {
+// TicketAction into a final result, fetching issues, consulting the issue
+// picker, or asking for a new ticket's title+description as needed.
+func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, team string, pick issuePicker, ask composePrompt, out io.Writer) (TicketFlowResult, error) {
 	switch action {
 	case ActionCancelled, ActionSkip:
 		return TicketFlowResult{Action: action}, nil
 	case ActionCreate:
-		return TicketFlowResult{
-			Action:   ActionCreate,
-			HintText: "run `arat ticket create -t \"<title>\"` first, then re-run with --ticket <id>",
-		}, nil
+		return promptCreate(ctx, ask, out)
 	case ActionPick:
 		issues, err := lc.IssueList(ctx, linear.IssueListOptions{AssignedToMe: true, Team: team})
 		if err != nil {
 			return TicketFlowResult{}, fmt.Errorf("list issues: %w", err)
 		}
 		if len(issues) == 0 {
-			return TicketFlowResult{
-				Action:   ActionCreate,
-				HintText: "no open issues assigned to you — create one with `arat ticket create -t \"<title>\"` and re-run with --ticket <id>",
-			}, nil
+			// Nothing assigned: fall through to the create prompt so the
+			// user doesn't have to bail out and re-run.
+			return promptCreate(ctx, ask, out)
 		}
 		picked, err := pick(ctx, issues, out)
 		if err != nil {
@@ -78,6 +88,27 @@ func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, 
 		return TicketFlowResult{Action: ActionPick, IssueID: picked.ID}, nil
 	}
 	return TicketFlowResult{Action: ActionCancelled}, nil
+}
+
+// promptCreate runs the compose prompt and turns its outcome into a flow
+// result. An empty title (or Esc) is treated as cancellation.
+func promptCreate(ctx context.Context, ask composePrompt, out io.Writer) (TicketFlowResult, error) {
+	res, err := ask(ctx, out)
+	if err != nil {
+		return TicketFlowResult{}, err
+	}
+	if res.Cancelled {
+		return TicketFlowResult{Action: ActionCancelled}, nil
+	}
+	title := strings.TrimSpace(res.Title)
+	if title == "" {
+		return TicketFlowResult{Action: ActionCancelled}, nil
+	}
+	return TicketFlowResult{
+		Action:         ActionCreate,
+		NewTitle:       title,
+		NewDescription: strings.TrimSpace(res.Description),
+	}, nil
 }
 
 // --- action chooser model -------------------------------------------
@@ -102,7 +133,7 @@ func newActionModel() *actionModel {
 	items := []list.Item{
 		actionItem{"Skip ticket", "create the workspace without a ticket attached", ActionSkip},
 		actionItem{"Pick existing", "choose from your open Linear issues", ActionPick},
-		actionItem{"Create new", "exit and tell me how to create one", ActionCreate},
+		actionItem{"Create new", "type a title (and optional description) to create one inline", ActionCreate},
 	}
 	delegate := list.NewDefaultDelegate()
 	l := list.New(items, delegate, 0, 0)
@@ -155,6 +186,124 @@ func pickTicketAction(ctx context.Context, out io.Writer) (TicketAction, error) 
 		return ActionCancelled, fmt.Errorf("tui: %w", err)
 	}
 	return final.(*actionModel).chosen, nil
+}
+
+// --- new-ticket compose input ---------------------------------------
+
+// composeModel is a two-field form: a single-line title (textinput) and a
+// multi-line description (textarea). Tab cycles focus; Enter on the title
+// advances to the description (and inserts a newline once focus is in the
+// description); Ctrl+D submits; Esc/Ctrl+C cancels.
+type composeModel struct {
+	title     textinput.Model
+	desc      textarea.Model
+	focus     int // 0 = title, 1 = description
+	cancelled bool
+	done      bool
+}
+
+func newComposeModel() *composeModel {
+	ti := textinput.New()
+	ti.Placeholder = "ticket title"
+	ti.CharLimit = 240
+	ti.Width = 60
+	ti.Focus()
+
+	ta := textarea.New()
+	ta.Placeholder = "description (optional)"
+	ta.ShowLineNumbers = false
+	ta.SetWidth(60)
+	ta.SetHeight(6)
+	ta.Blur()
+
+	return &composeModel{title: ti, desc: ta}
+}
+
+func (m *composeModel) Init() tea.Cmd { return textinput.Blink }
+
+func (m *composeModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "ctrl+c", "esc":
+			m.cancelled = true
+			m.done = true
+			return m, tea.Quit
+		case "ctrl+d":
+			m.done = true
+			return m, tea.Quit
+		case "tab", "shift+tab":
+			m.toggleFocus()
+			return m, nil
+		case "enter":
+			// On the title field, Enter advances to the description so the
+			// user can type a body. Once focused on the description, Enter
+			// falls through to the textarea (newline).
+			if m.focus == 0 {
+				m.focusDescription()
+				return m, nil
+			}
+		}
+	}
+	var cmd tea.Cmd
+	if m.focus == 0 {
+		m.title, cmd = m.title.Update(msg)
+	} else {
+		m.desc, cmd = m.desc.Update(msg)
+	}
+	return m, cmd
+}
+
+func (m *composeModel) focusTitle() {
+	m.focus = 0
+	m.desc.Blur()
+	m.title.Focus()
+}
+
+func (m *composeModel) focusDescription() {
+	m.focus = 1
+	m.title.Blur()
+	m.desc.Focus()
+}
+
+func (m *composeModel) toggleFocus() {
+	if m.focus == 0 {
+		m.focusDescription()
+	} else {
+		m.focusTitle()
+	}
+}
+
+func (m *composeModel) View() string {
+	if m.done {
+		return ""
+	}
+	return strings.Join([]string{
+		"New ticket",
+		"",
+		"Title:",
+		m.title.View(),
+		"",
+		"Description:",
+		m.desc.View(),
+		"",
+		dimStyle.Render("(tab to switch field · ctrl+d submits · esc cancels)"),
+	}, "\n")
+}
+
+func askCompose(ctx context.Context, out io.Writer) (composeResult, error) {
+	m := newComposeModel()
+	opts, cleanup := programOpts(ctx, out)
+	defer cleanup()
+	prog := tea.NewProgram(m, opts...)
+	final, err := prog.Run()
+	if err != nil {
+		return composeResult{}, fmt.Errorf("tui: %w", err)
+	}
+	cm := final.(*composeModel)
+	if cm.cancelled {
+		return composeResult{Cancelled: true}, nil
+	}
+	return composeResult{Title: cm.title.Value(), Description: cm.desc.Value()}, nil
 }
 
 // --- issue picker model ---------------------------------------------

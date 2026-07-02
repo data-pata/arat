@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/data-pata/arat/internal/config"
@@ -252,12 +253,6 @@ func TestNew_repos(t *testing.T) {
 	assert.Equal(t, []string{"a", "b", "c"}, svc.newCalls[0].Repos)
 }
 
-func TestNew_mutuallyExclusiveTicketFlags(t *testing.T) {
-	r := run(t, []string{"new", "x", "--ticket", "abc-1", "--no-ticket"}, nil, nil)
-	assert.Equal(t, ExitUsage, r.exit)
-	assert.Contains(t, r.stderr, "mutually exclusive")
-}
-
 func TestNew_conflict(t *testing.T) {
 	svc := &fakeService{newErr: fmt.Errorf("%w: dup", workspace.ErrAlreadyExists)}
 	r := run(t, []string{"new", "dup", "--no-ticket"}, nil, svc)
@@ -415,15 +410,112 @@ func TestNew_interactiveCancelled(t *testing.T) {
 	assert.Equal(t, ExitUsage, r.exit)
 }
 
-func TestNew_interactiveHintPrinted(t *testing.T) {
-	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
-	lc := &fakeLinear{available: true}
+func TestNew_interactiveCreatesTicket(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
 	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Skip: true, Hint: "run `arat ticket create` first"}, nil
+		return TicketFlowResult{NewTitle: "Fix the bug", NewDescription: "body line"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
 	assert.Equal(t, 0, r.exit, r.stderr)
-	assert.Contains(t, r.stderr, "run `arat ticket create` first")
+	require.Len(t, lc.createCalls, 1)
+	assert.Equal(t, "Fix the bug", lc.createCalls[0].Title)
+	assert.Equal(t, "body line", lc.createCalls[0].Description, "description from compose flow flows into linear create")
+	assert.Equal(t, "ABC", lc.createCalls[0].Team)
+	assert.Equal(t, "Backlog", lc.createCalls[0].State)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "abc-9", svc.newCalls[0].Ticket, "newly created ticket id flows into service.New, lowercased")
+}
+
+func TestNew_interactiveCreateFailureSurfaces(t *testing.T) {
+	lc := &fakeLinear{available: true, createErr: errors.New("linear down")}
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{NewTitle: "Fix the bug"}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x"}, nil, &fakeService{}, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, ExitExternal, r.exit)
+	assert.Contains(t, r.stderr, "linear down")
+}
+
+func TestNew_newTicketFlag(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
+	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "Fix the bug"}, nil, svc, depsOpts{linear: lc})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, lc.createCalls, 1)
+	assert.Equal(t, "Fix the bug", lc.createCalls[0].Title)
+	assert.Empty(t, lc.createCalls[0].Description, "no --new-ticket-description means no description sent")
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "abc-9", svc.newCalls[0].Ticket)
+}
+
+func TestNew_newTicketFlagWithDescription(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
+	r := runWithDeps(t, []string{
+		"new", "x",
+		"--new-ticket", "Fix the bug",
+		"--new-ticket-description", "Repro steps here.\nLine two.",
+	}, nil, svc, depsOpts{linear: lc})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, lc.createCalls, 1)
+	assert.Equal(t, "Fix the bug", lc.createCalls[0].Title)
+	assert.Equal(t, "Repro steps here.\nLine two.", lc.createCalls[0].Description)
+}
+
+func TestNew_newTicketDescriptionWithoutNewTicketRejected(t *testing.T) {
+	r := run(t, []string{"new", "x", "--new-ticket-description", "body"}, nil, nil)
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "--new-ticket-description requires --new-ticket")
+}
+
+func TestNew_newTicketFlagLinearUnavailable(t *testing.T) {
+	lc := &fakeLinear{available: false}
+	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "x"}, nil, &fakeService{}, depsOpts{linear: lc})
+	assert.Equal(t, ExitExternal, r.exit)
+	assert.Contains(t, r.stderr, "linear")
+}
+
+func TestNew_newTicketFlagNoIDParsed(t *testing.T) {
+	lc := &fakeLinear{available: true, createResult: linear.IssueResult{Raw: "no id here"}}
+	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "x"}, nil, &fakeService{}, depsOpts{linear: lc})
+	assert.Equal(t, ExitExternal, r.exit)
+	assert.Contains(t, r.stderr, "could not be parsed")
+}
+
+func TestNew_newTicketFlagLinearDisabled(t *testing.T) {
+	cfg := &config.Config{Root: "/tmp", BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: false}}
+	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "Title"}, cfg, &fakeService{}, depsOpts{linear: &fakeLinear{available: true}})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "linear")
+}
+
+func TestNew_newTicketSkipsInteractiveFlow(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-1--x", Path: "/p"}}
+	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-1"}}
+	flowCalled := false
+	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+		flowCalled = true
+		return TicketFlowResult{}, nil
+	}
+	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "Title"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.False(t, flowCalled, "--new-ticket short-circuits the interactive ticket flow")
+}
+
+func TestNew_ticketFlagsMutuallyExclusive(t *testing.T) {
+	cases := [][]string{
+		{"new", "x", "--ticket", "abc-1", "--new-ticket", "Title"},
+		{"new", "x", "--new-ticket", "Title", "--no-ticket"},
+		{"new", "x", "--ticket", "abc-1", "--no-ticket"},
+	}
+	for _, args := range cases {
+		t.Run(strings.Join(args[2:], " "), func(t *testing.T) {
+			r := run(t, args, nil, nil)
+			assert.Equal(t, ExitUsage, r.exit)
+			assert.Contains(t, r.stderr, "mutually exclusive")
+		})
+	}
 }
 
 func TestNew_noFlowWhenNotTTY(t *testing.T) {

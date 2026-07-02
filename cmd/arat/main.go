@@ -88,7 +88,7 @@ func main() {
 			if err != nil {
 				return cmd.TicketFlowResult{}, err
 			}
-			out_ := cmd.TicketFlowResult{Hint: res.HintText}
+			var out_ cmd.TicketFlowResult
 			switch res.Action {
 			case tui.ActionPick:
 				out_.Ticket = res.IssueID
@@ -97,7 +97,8 @@ func main() {
 			case tui.ActionCancelled:
 				out_.Cancelled = true
 			case tui.ActionCreate:
-				out_.Skip = true // create-new path: print hint, don't fail
+				out_.NewTitle = res.NewTitle
+				out_.NewDescription = res.NewDescription
 			}
 			return out_, nil
 		},
