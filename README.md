@@ -78,15 +78,15 @@ default_team  = "ABC"
 
 | Command | Purpose |
 | --- | --- |
-| `arat ls [--json]` | List workspaces with `*dirty* *unpushed* *stashes:N*` markers. |
+| `arat ls [--flat] [--json]` | List workspaces with `*dirty* *unpushed* *stashes:N*` markers, nested workspaces indented under their parent. `--flat` lists every workspace at the top level under its full ref (composable with `--json`). |
 | `arat new <name> [--project] [--in REF] [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--carry-session ID] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. `--project` creates a top-level container instead of a leaf; `--in <ref>` places the new workspace inside another one (`--in .` for the workspace at cwd), and `--from-parent` branches off that parent's branches. `--carry-session` moves a Claude Code session jsonl into the new workspace's project dir so `/resume` finds it after `cd`. |
 | `arat rm [ref] [--force] [--keep-branches] [--recursive]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed unless `--force`, and on a workspace that still has others nested inside it unless `--recursive`. No ref → interactive picker. |
 | `arat go [ref]` | Print path to a workspace. With shell wrapper, `cd`s into it. No ref → interactive picker. |
-| `arat project link <ref> (--project \| --initiative) <slug-or-name>` | Link a project workspace to a Linear project or initiative. |
+| `arat project link <ref> [--project \| --initiative <slug-or-name>]` | Link a project workspace to a Linear project or initiative. Without a flag, on a tty, opens a picker over both kinds. |
 | `arat project unlink <ref>` | Remove a project workspace's Linear link. |
 | `arat ticket create -t <title> [--team] [--project] [--state] [-d desc] [-l label]` | Create a Linear issue via `linear issue create --no-interactive`. |
 | `arat ticket attach <name> <ticket>` | Attach a ticket to a ticketless workspace; renames dirs/branches, updates CLAUDE.md, and migrates `~/.claude/projects/<encoded>` session dirs to the new path. |
-| `arat repo add [--workspace NAME] [--base REF] <repo>...` | Add one or more git worktrees to an existing multi-repo workspace, on its existing feature branch. Workspace inferred from cwd if `--workspace` omitted. |
+| `arat repo add [--workspace NAME] [--base REF] [--recursive] <repo>...` | Add one or more git worktrees to an existing multi-repo workspace, on its existing feature branch. Workspace inferred from cwd if `--workspace` omitted. `--recursive` fans out to every nested workspace, skipping ones that already carry the repo. |
 | `arat note [name] <text...>` | Post a comment on the workspace's Linear ticket. Workspace inferred from cwd if name omitted. |
 | `arat init <bash\|zsh\|fish>` | Print shell integration. |
 | `arat config init [--force] / path` | Write / resolve the config file. |

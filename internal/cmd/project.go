@@ -42,24 +42,30 @@ func newProjectLinkCmd(s *state) *cobra.Command {
 		Short: "Link a project workspace to a Linear project or initiative",
 		Long: `Attach a Linear project or initiative to a project workspace.
 
-Exactly one of --project or --initiative is required. The value is matched
-against Linear by slug id first, then by name (case-insensitive); an
-ambiguous name is an error rather than a guess.
+With --project or --initiative, the value is matched against Linear by slug
+id first, then by name (case-insensitive); an ambiguous name is an error
+rather than a guess. The two flags are mutually exclusive.
 
-Linear projects do not nest — only initiatives do — so arat does not require
-your workspace nesting to mirror Linear's. A nested project workspace may be
-linked to either kind, or to nothing at all.
+With neither flag, in a terminal, an interactive picker opens over all Linear
+projects and initiatives. Outside a terminal (AI / pipes) one of the flags is
+required.
 
 The resolved name and URL are cached in the workspace's marker file so
 "arat ls" can show them without a network call.
 `,
-		Example: `  arat project link q3-billing --project "Q3 Billing"
-  arat project link q3-billing/dunning --initiative "Payments 2026"`,
+		Example: `  arat project link q3-billing
+  arat project link q3-billing --project "Q3 Billing"
+  arat project link q3-billing --initiative "Payments 2026"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, query, err := projectLinkTarget(projectName, initiativeName)
 			if err != nil {
 				return &exitErr{code: ExitUsage, err: err}
+			}
+			// No flag and no way to ask: fail as a usage error before any
+			// config or Linear access, so scripts get a stable exit 2.
+			if kind == "" && (!isInteractive(s.deps) || s.deps.PickContainer == nil) {
+				return &exitErr{code: ExitUsage, err: errors.New("one of --project or --initiative is required (or run in a terminal to pick interactively)")}
 			}
 
 			cfg, err := s.loadConfig()
@@ -74,13 +80,24 @@ The resolved name and URL are cached in the workspace's marker file so
 			if err := lc.Available(cmd.Context()); err != nil {
 				return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 			}
-			containers, err := lc.ContainerList(cmd.Context(), kind)
-			if err != nil {
-				return &exitErr{code: ExitExternal, err: err}
-			}
-			match, err := resolveContainer(containers, query)
-			if err != nil {
-				return &exitErr{code: ExitNotFound, err: err}
+
+			var match linear.Container
+			if kind == "" {
+				// No flag: interactive pick across both kinds.
+				picked, err := pickContainerInteractive(cmd, s, lc)
+				if err != nil {
+					return err
+				}
+				match = *picked
+			} else {
+				containers, err := lc.ContainerList(cmd.Context(), kind)
+				if err != nil {
+					return &exitErr{code: ExitExternal, err: err}
+				}
+				match, err = resolveContainer(containers, query)
+				if err != nil {
+					return &exitErr{code: ExitNotFound, err: err}
+				}
 			}
 
 			svc := s.deps.NewService(cfg)
@@ -139,8 +156,9 @@ a project that is not linked succeeds and does nothing.
 	}
 }
 
-// projectLinkTarget enforces that exactly one of --project / --initiative is
-// given and reports which, along with the value to look up.
+// projectLinkTarget reports which of --project / --initiative was given and
+// the value to look up. Neither is fine — kind comes back empty and the
+// caller goes interactive — but both at once is an error.
 func projectLinkTarget(projectName, initiativeName string) (kind, query string, err error) {
 	switch {
 	case projectName != "" && initiativeName != "":
@@ -150,7 +168,39 @@ func projectLinkTarget(projectName, initiativeName string) (kind, query string, 
 	case initiativeName != "":
 		return linear.ContainerInitiative, initiativeName, nil
 	}
-	return "", "", errors.New("one of --project or --initiative is required")
+	return "", "", nil
+}
+
+// pickContainerInteractive fetches every Linear project and initiative and
+// lets the user pick one. The caller has already verified a terminal and a
+// wired picker.
+func pickContainerInteractive(cmd *cobra.Command, s *state, lc LinearClient) (*linear.Container, error) {
+	projects, err := lc.ContainerList(cmd.Context(), linear.ContainerProject)
+	if err != nil {
+		return nil, &exitErr{code: ExitExternal, err: err}
+	}
+	initiatives, err := lc.ContainerList(cmd.Context(), linear.ContainerInitiative)
+	if err != nil {
+		return nil, &exitErr{code: ExitExternal, err: err}
+	}
+
+	// Projects first, then initiatives, each sorted by name: linking to a
+	// project is the common case, and a stable order makes the list scannable.
+	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
+	sort.Slice(initiatives, func(i, j int) bool { return initiatives[i].Name < initiatives[j].Name })
+	containers := append(projects, initiatives...)
+	if len(containers) == 0 {
+		return nil, &exitErr{code: ExitNotFound, err: errors.New("no linear projects or initiatives found")}
+	}
+
+	picked, err := s.deps.PickContainer(cmd.Context(), containers, s.deps.Stderr)
+	if err != nil {
+		return nil, &exitErr{code: ExitExternal, err: err}
+	}
+	if picked == nil {
+		return nil, &exitErr{code: ExitUsage, err: errors.New("cancelled")}
+	}
+	return picked, nil
 }
 
 // resolveContainer picks the Linear project or initiative that query refers

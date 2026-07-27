@@ -723,8 +723,9 @@ func TestAddRepos_happy(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, res)
-	require.Len(t, res.Added, 2)
-	for _, r := range res.Added {
+	require.Len(t, res.Outcomes, 1)
+	require.Len(t, res.Outcomes[0].Added, 2)
+	for _, r := range res.Outcomes[0].Added {
 		assert.Equal(t, "ps--feat--abc-1", r.Branch)
 		assert.True(t, dirExists(r.Path))
 	}
@@ -756,7 +757,7 @@ func TestAddRepos_derivesBranchFromExistingWorktree(t *testing.T) {
 		Repos:     []string{"repo-b"},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "ps--feat--abc-7", res.Added[0].Branch)
+	assert.Equal(t, "ps--feat--abc-7", res.Outcomes[0].Added[0].Branch)
 }
 
 func TestAddRepos_regeneratesCodeWorkspace(t *testing.T) {

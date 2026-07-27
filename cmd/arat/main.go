@@ -79,6 +79,9 @@ func main() {
 			}
 			return ws, nil
 		},
+		PickContainer: func(ctx context.Context, containers []linear.Container, out io.Writer) (*linear.Container, error) {
+			return tui.PickContainer(ctx, containers, out)
+		},
 		NewLinear: func() cmd.LinearClient { return linear.New() },
 		Cwd:       os.Getwd,
 		IsTTY:     func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },

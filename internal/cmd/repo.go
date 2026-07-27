@@ -19,8 +19,9 @@ func newRepoCmd(s *state) *cobra.Command {
 
 func newRepoAddCmd(s *state) *cobra.Command {
 	var (
-		wsName string
-		base   string
+		wsName    string
+		base      string
+		recursive bool
 	)
 	c := &cobra.Command{
 		Use:   "add <repo>...",
@@ -35,12 +36,19 @@ If --workspace is omitted, the workspace is inferred from the current
 directory. Refuses if the workspace is a single-repo layout (the workspace
 dir itself is a worktree).
 
+With --recursive, the repos are also added to every workspace nested under
+the target, each on its own feature branch. Workspaces that already carry a
+repo are skipped rather than errors, so it is safe to run over a tree where
+some members already have it. Every workspace branches off the same base —
+fan-out never stacks children on their parent's branch.
+
 Regenerates <name>.code-workspace if one already exists. Does not edit
 CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 `,
 		Example: `  arat repo add ui-app
   arat repo add core-mono ui-app --workspace abc-123--postal-fix
-  arat repo add ui-app --base origin/main`,
+  arat repo add ui-app --base origin/main
+  arat repo add ui-app --workspace q3-billing --recursive`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := s.loadConfig()
@@ -67,21 +75,30 @@ CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 				Workspace: name,
 				Repos:     args,
 				Base:      base,
+				Recursive: recursive,
 			})
 			if err != nil {
 				return mapAddReposError(err)
 			}
 
-			fmt.Fprintf(s.deps.Stderr, "added %d repo(s) to %s\n", len(res.Added), res.Workspace.Name)
-			for _, r := range res.Added {
-				fmt.Fprintf(s.deps.Stderr, "  %s → %s\n", r.Name, r.Branch)
-				fmt.Fprintf(s.deps.Stdout, "%s\n", r.Path)
+			for _, o := range res.Outcomes {
+				if len(o.Added) > 0 {
+					fmt.Fprintf(s.deps.Stderr, "added %d repo(s) to %s\n", len(o.Added), o.Ref)
+					for _, r := range o.Added {
+						fmt.Fprintf(s.deps.Stderr, "  %s → %s\n", r.Name, r.Branch)
+						fmt.Fprintf(s.deps.Stdout, "%s\n", r.Path)
+					}
+				}
+				for _, reason := range o.Skipped {
+					fmt.Fprintf(s.deps.Stderr, "skipped %s: %s\n", o.Ref, reason)
+				}
 			}
 			return nil
 		},
 	}
 	c.Flags().StringVar(&wsName, "workspace", "", "workspace name (default: inferred from cwd)")
 	c.Flags().StringVar(&base, "base", "", "branch base (default: origin/HEAD)")
+	c.Flags().BoolVar(&recursive, "recursive", false, "also add the repos to every workspace nested under the target")
 	return c
 }
 

@@ -35,6 +35,10 @@ type Deps struct {
 	NewConfig     func(path string) (*config.Config, error)
 	NewService    func(cfg *config.Config) Service
 	PickWorkspace func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error)
+	// PickContainer is the interactive picker over Linear projects and
+	// initiatives, used by `arat project link` when no --project/--initiative
+	// was given. Returns nil (no error) when the user cancels.
+	PickContainer func(ctx context.Context, containers []linear.Container, out io.Writer) (*linear.Container, error)
 	NewLinear     func() LinearClient
 	Cwd           func() (string, error)
 	TicketFlow    TicketFlow

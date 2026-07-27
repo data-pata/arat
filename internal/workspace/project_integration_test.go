@@ -261,6 +261,87 @@ func TestNew_subTaskInheritsParentBranchWhenAsked(t *testing.T) {
 	assert.FileExists(t, filepath.Join(stacked.Path, "repo-a", "parent-only.txt"))
 }
 
+// Fanning a repo out over a tree: the target and every descendant get the
+// repo on their own feature branch, and workspaces that already carry it are
+// skipped rather than failing the whole run.
+func TestAddRepos_recursiveFansOutToDescendants(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	_, err := svc.New(ctx, NewOptions{ShortName: "q3-billing", Kind: KindProject, Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	// One child that already has repo-b, one that doesn't, one grandchild.
+	_, err = svc.New(ctx, NewOptions{ShortName: "has-both", Ticket: "abc-1", Repos: []string{"repo-a", "repo-b"}, Parent: "q3-billing"})
+	require.NoError(t, err)
+	_, err = svc.New(ctx, NewOptions{ShortName: "has-one", Ticket: "abc-2", Repos: []string{"repo-a"}, Parent: "q3-billing"})
+	require.NoError(t, err)
+	_, err = svc.New(ctx, NewOptions{ShortName: "deep", Repos: []string{"repo-a"}, Parent: "q3-billing/abc-2--has-one"})
+	require.NoError(t, err)
+
+	res, err := svc.AddRepos(ctx, AddReposOptions{
+		Workspace: "q3-billing",
+		Repos:     []string{"repo-b"},
+		Recursive: true,
+	})
+	require.NoError(t, err)
+
+	byRef := make(map[string]WorkspaceAdd, len(res.Outcomes))
+	for _, o := range res.Outcomes {
+		byRef[o.Ref] = o
+	}
+	require.Len(t, byRef, 4, "target + all three descendants have an outcome")
+
+	// Added everywhere it was missing, each on that workspace's own branch.
+	require.Len(t, byRef["q3-billing"].Added, 1)
+	assert.Equal(t, "ps--q3-billing", byRef["q3-billing"].Added[0].Branch)
+	require.Len(t, byRef["q3-billing/abc-2--has-one"].Added, 1)
+	assert.Equal(t, "ps--has-one--abc-2", byRef["q3-billing/abc-2--has-one"].Added[0].Branch)
+	require.Len(t, byRef["q3-billing/abc-2--has-one/deep"].Added, 1)
+	assert.Equal(t, "ps--deep", byRef["q3-billing/abc-2--has-one/deep"].Added[0].Branch)
+
+	// Skipped where already present, with the reason on the outcome.
+	assert.Empty(t, byRef["q3-billing/abc-1--has-both"].Added)
+	assert.Equal(t, []string{"repo-b: already present"}, byRef["q3-billing/abc-1--has-both"].Skipped)
+
+	// The worktrees exist on disk.
+	assert.DirExists(t, filepath.Join(svc.WorkspacesDir, "q3-billing", "repo-b"))
+	assert.DirExists(t, filepath.Join(svc.WorkspacesDir, "q3-billing", "abc-2--has-one", "repo-b"))
+	assert.DirExists(t, filepath.Join(svc.WorkspacesDir, "q3-billing", "abc-2--has-one", "deep", "repo-b"))
+}
+
+// A child workspace directory that happens to share the repo's name must not
+// be clobbered by a fan-out: it reads as "already present" and is skipped.
+func TestAddRepos_recursiveDoesNotClobberSameNamedChild(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	_, err := svc.New(ctx, NewOptions{ShortName: "q3-billing", Kind: KindProject})
+	require.NoError(t, err)
+	// A child workspace named exactly like the repo being added.
+	_, err = svc.New(ctx, NewOptions{ShortName: "repo-b", Repos: []string{"repo-a"}, Parent: "q3-billing"})
+	require.NoError(t, err)
+
+	res, err := svc.AddRepos(ctx, AddReposOptions{
+		Workspace: "q3-billing",
+		Repos:     []string{"repo-b"},
+		Recursive: true,
+	})
+	require.NoError(t, err)
+
+	require.Len(t, res.Outcomes, 2)
+	assert.Empty(t, res.Outcomes[0].Added, "project must not overwrite its child workspace dir")
+	assert.Equal(t, []string{"repo-b: already present"}, res.Outcomes[0].Skipped)
+	// The child itself gets the repo, since its own subdirs are free.
+	require.Len(t, res.Outcomes[1].Added, 1)
+
+	// The child workspace is still a workspace, not a worktree.
+	got, err := svc.Get(ctx, "q3-billing/repo-b")
+	require.NoError(t, err)
+	assert.Equal(t, "q3-billing/repo-b", got.Ref)
+}
+
 // Removing a task that holds sub-issues takes them with it, so it needs the
 // same explicit --recursive a project does.
 func TestRemove_taskWithSubTasksNeedsRecursive(t *testing.T) {

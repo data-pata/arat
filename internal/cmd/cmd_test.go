@@ -157,13 +157,14 @@ func runWithPicker(t *testing.T, args []string, cfg *config.Config, svc *fakeSer
 }
 
 type depsOpts struct {
-	picker   func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error)
-	linear   *fakeLinear
-	cwd      func() (string, error)
-	tickFlow TicketFlow
-	repoFlow RepoFlow
-	isTTY    func() bool
-	confirm  func(prompt string) (bool, error)
+	picker        func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error)
+	pickContainer func(context.Context, []linear.Container, io.Writer) (*linear.Container, error)
+	linear        *fakeLinear
+	cwd           func() (string, error)
+	tickFlow      TicketFlow
+	repoFlow      RepoFlow
+	isTTY         func() bool
+	confirm       func(prompt string) (bool, error)
 }
 
 func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeService, opts depsOpts) runResult {
@@ -185,6 +186,7 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 	if opts.linear != nil {
 		deps.NewLinear = func() LinearClient { return opts.linear }
 	}
+	deps.PickContainer = opts.pickContainer
 	deps.TicketFlow = opts.tickFlow
 	deps.RepoFlow = opts.repoFlow
 	deps.IsTTY = opts.isTTY
@@ -202,6 +204,9 @@ type fakeLinear struct {
 	createErr       error
 	commentErr      error
 	containerResult []linear.Container
+	// containerByKind, when non-nil, makes ContainerList kind-sensitive
+	// (used by the interactive-picker tests, which fetch both kinds).
+	containerByKind map[string][]linear.Container
 	containerErr    error
 
 	listCalls      []linear.IssueListOptions
@@ -230,6 +235,9 @@ func (f *fakeLinear) CommentAdd(_ context.Context, opts linear.CommentAddOptions
 }
 func (f *fakeLinear) ContainerList(_ context.Context, kind string) ([]linear.Container, error) {
 	f.containerCalls = append(f.containerCalls, kind)
+	if f.containerByKind != nil {
+		return f.containerByKind[kind], f.containerErr
+	}
 	return f.containerResult, f.containerErr
 }
 
@@ -1042,9 +1050,12 @@ func TestRepoAdd_explicitWorkspace(t *testing.T) {
 
 	svc := &fakeService{addReposResult: &workspace.AddReposResult{
 		Workspace: &workspace.Workspace{Name: "abc-1--x", Path: filepath.Join(wsDir, "abc-1--x")},
-		Added: []workspace.RepoStatus{
-			{Name: "repo-b", Path: filepath.Join(wsDir, "abc-1--x", "repo-b"), Branch: "ps--x--abc-1"},
-		},
+		Outcomes: []workspace.WorkspaceAdd{{
+			Ref: "abc-1--x",
+			Added: []workspace.RepoStatus{
+				{Name: "repo-b", Path: filepath.Join(wsDir, "abc-1--x", "repo-b"), Branch: "ps--x--abc-1"},
+			},
+		}},
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "abc-1--x", "repo-b"}, cfg, svc, depsOpts{cwd: failingCwd(t)})
 	assert.Equal(t, 0, r.exit, r.stderr)
@@ -1064,7 +1075,10 @@ func TestRepoAdd_inferFromCwd(t *testing.T) {
 	svc := &fakeService{
 		addReposResult: &workspace.AddReposResult{
 			Workspace: &workspace.Workspace{Name: "myws"},
-			Added:     []workspace.RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--myws"}},
+			Outcomes: []workspace.WorkspaceAdd{{
+				Ref:   "myws",
+				Added: []workspace.RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--myws"}},
+			}},
 		},
 		workspaceAtRes: &workspace.Workspace{Name: "myws", Ref: "myws"},
 	}
@@ -1078,10 +1092,13 @@ func TestRepoAdd_inferFromCwd(t *testing.T) {
 func TestRepoAdd_multipleRepos(t *testing.T) {
 	svc := &fakeService{addReposResult: &workspace.AddReposResult{
 		Workspace: &workspace.Workspace{Name: "x"},
-		Added: []workspace.RepoStatus{
-			{Name: "repo-b", Path: "/x/repo-b", Branch: "ps--x"},
-			{Name: "repo-c", Path: "/x/repo-c", Branch: "ps--x"},
-		},
+		Outcomes: []workspace.WorkspaceAdd{{
+			Ref: "x",
+			Added: []workspace.RepoStatus{
+				{Name: "repo-b", Path: "/x/repo-b", Branch: "ps--x"},
+				{Name: "repo-c", Path: "/x/repo-c", Branch: "ps--x"},
+			},
+		}},
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "repo-b", "repo-c"}, nil, svc, depsOpts{cwd: failingCwd(t)})
 	assert.Equal(t, 0, r.exit, r.stderr)
@@ -1092,7 +1109,10 @@ func TestRepoAdd_multipleRepos(t *testing.T) {
 func TestRepoAdd_baseFlag(t *testing.T) {
 	svc := &fakeService{addReposResult: &workspace.AddReposResult{
 		Workspace: &workspace.Workspace{Name: "x"},
-		Added:     []workspace.RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--x"}},
+		Outcomes: []workspace.WorkspaceAdd{{
+			Ref:   "x",
+			Added: []workspace.RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--x"}},
+		}},
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "--base", "origin/main", "repo-b"}, nil, svc, depsOpts{cwd: failingCwd(t)})
 	assert.Equal(t, 0, r.exit, r.stderr)

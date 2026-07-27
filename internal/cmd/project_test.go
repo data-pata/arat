@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"testing"
@@ -272,6 +273,83 @@ func TestLs_emptyProject(t *testing.T) {
 	assert.NotContains(t, r.stdout, "(no worktrees)", "a project without worktrees is normal, not noteworthy")
 }
 
+func TestLs_flat(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{
+		{
+			Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject,
+			Repos: []workspace.RepoStatus{{Name: "core-api", Branch: "ps--q3-billing"}},
+			Children: []workspace.Workspace{
+				{
+					Name: "abc-12--invoice", Ref: "q3-billing/abc-12--invoice", Parent: "q3-billing",
+					Kind:  workspace.KindTask,
+					Repos: []workspace.RepoStatus{{Name: "core-api", Branch: "ps--invoice--abc-12"}},
+					Children: []workspace.Workspace{
+						{
+							Name: "abc-18--fonts", Ref: "q3-billing/abc-12--invoice/abc-18--fonts",
+							Parent: "q3-billing/abc-12--invoice", Kind: workspace.KindTask,
+						},
+					},
+				},
+			},
+		},
+		{Name: "solo", Ref: "solo", Kind: workspace.KindTask},
+	}}
+	r := run(t, []string{"ls", "--flat"}, nil, svc)
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	// Every workspace appears at column zero, headed by its full ref.
+	assert.Contains(t, r.stdout, "── q3-billing ── (project)")
+	assert.Contains(t, r.stdout, "\n── q3-billing/abc-12--invoice ──")
+	assert.Contains(t, r.stdout, "\n── q3-billing/abc-12--invoice/abc-18--fonts ──")
+	assert.Contains(t, r.stdout, "\n── solo ──")
+	assert.NotContains(t, r.stdout, "  ── ", "flat output must not indent headers")
+}
+
+func TestLs_flatJSON(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{
+		{
+			Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject,
+			Children: []workspace.Workspace{
+				{Name: "abc-12--invoice", Ref: "q3-billing/abc-12--invoice", Parent: "q3-billing", Kind: workspace.KindTask},
+			},
+		},
+	}}
+	r := run(t, []string{"ls", "--flat", "--json"}, nil, svc)
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal([]byte(r.stdout), &got))
+	require.Len(t, got, 2, "flat JSON lists every workspace exactly once")
+	assert.Equal(t, "q3-billing", got[0]["ref"])
+	assert.Equal(t, "q3-billing/abc-12--invoice", got[1]["ref"])
+	for _, ws := range got {
+		assert.NotContains(t, ws, "children", "children are stripped so no workspace appears twice")
+	}
+}
+
+// --- arat repo add --recursive ----------------------------------------
+
+func TestRepoAdd_recursiveFlagAndReporting(t *testing.T) {
+	svc := &fakeService{addReposResult: &workspace.AddReposResult{
+		Workspace: &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing"},
+		Outcomes: []workspace.WorkspaceAdd{
+			{Ref: "q3-billing", Added: []workspace.RepoStatus{{Name: "ui-app", Path: "/q3/ui-app", Branch: "ps--q3-billing"}}},
+			{Ref: "q3-billing/abc-1--x", Skipped: []string{"ui-app: already present"}},
+			{Ref: "q3-billing/abc-2--y", Added: []workspace.RepoStatus{{Name: "ui-app", Path: "/q3/y/ui-app", Branch: "ps--y--abc-2"}}},
+		},
+	}}
+	r := runWithDeps(t, []string{"repo", "add", "--workspace", "q3-billing", "--recursive", "ui-app"}, nil, svc, depsOpts{cwd: failingCwd(t)})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.addReposCalls, 1)
+	assert.True(t, svc.addReposCalls[0].Recursive)
+	// Every added worktree path lands on stdout for scripting.
+	assert.Contains(t, r.stdout, "/q3/ui-app")
+	assert.Contains(t, r.stdout, "/q3/y/ui-app")
+	// Skips are reported per workspace on stderr.
+	assert.Contains(t, r.stderr, "skipped q3-billing/abc-1--x: ui-app: already present")
+}
+
 // --- arat rm --recursive ----------------------------------------------
 
 func TestRm_recursiveFlag(t *testing.T) {
@@ -394,6 +472,67 @@ func TestProjectLink_requiresExactlyOneTarget(t *testing.T) {
 			assert.Empty(t, lc.containerCalls, "Linear must not be queried for an invalid invocation")
 		})
 	}
+}
+
+func TestProjectLink_interactivePicker(t *testing.T) {
+	svc := &fakeService{linkResult: &workspace.Workspace{
+		Name: "q3-billing", Ref: "q3-billing", Path: "/p", Kind: workspace.KindProject,
+	}}
+	lc := &fakeLinear{available: true, containerByKind: map[string][]linear.Container{
+		"project": {
+			{Kind: "project", ID: "slug-z", Name: "Zeta"},
+			{Kind: "project", ID: "slug-a", Name: "Alpha"},
+		},
+		"initiative": {
+			{Kind: "initiative", ID: "slug-i", Name: "Payments 2026"},
+		},
+	}}
+	var offered []linear.Container
+	pick := func(_ context.Context, containers []linear.Container, _ io.Writer) (*linear.Container, error) {
+		offered = containers
+		return &containers[2], nil
+	}
+	r := runWithDeps(t, []string{"project", "link", "q3-billing"}, nil, svc,
+		depsOpts{linear: lc, isTTY: func() bool { return true }, pickContainer: pick})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, []string{"project", "initiative"}, lc.containerCalls, "both kinds are offered")
+	// Projects first (sorted), then initiatives.
+	require.Len(t, offered, 3)
+	assert.Equal(t, "Alpha", offered[0].Name)
+	assert.Equal(t, "Zeta", offered[1].Name)
+	assert.Equal(t, "Payments 2026", offered[2].Name)
+	require.Len(t, svc.linkCalls, 1)
+	assert.Equal(t, workspace.LinearRef{Kind: "initiative", ID: "slug-i", Name: "Payments 2026"}, svc.linkCalls[0].Linear)
+}
+
+func TestProjectLink_interactiveCancelled(t *testing.T) {
+	lc := &fakeLinear{available: true, containerResult: []linear.Container{
+		{Kind: "project", ID: "slug-1", Name: "Billing"},
+	}}
+	svc := &fakeService{}
+	pick := func(_ context.Context, _ []linear.Container, _ io.Writer) (*linear.Container, error) {
+		return nil, nil
+	}
+	r := runWithDeps(t, []string{"project", "link", "q3-billing"}, nil, svc,
+		depsOpts{linear: lc, isTTY: func() bool { return true }, pickContainer: pick})
+
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "cancelled")
+	assert.Empty(t, svc.linkCalls)
+}
+
+func TestProjectLink_interactiveNothingToPick(t *testing.T) {
+	lc := &fakeLinear{available: true}
+	pick := func(_ context.Context, _ []linear.Container, _ io.Writer) (*linear.Container, error) {
+		t.Fatal("picker must not open on an empty list")
+		return nil, nil
+	}
+	r := runWithDeps(t, []string{"project", "link", "q3-billing"}, nil, &fakeService{},
+		depsOpts{linear: lc, isTTY: func() bool { return true }, pickContainer: pick})
+
+	assert.Equal(t, ExitNotFound, r.exit)
+	assert.Contains(t, r.stderr, "no linear projects or initiatives found")
 }
 
 func TestProjectLink_rejectsTaskWorkspace(t *testing.T) {
