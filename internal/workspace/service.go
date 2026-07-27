@@ -27,6 +27,9 @@ type Git interface {
 	BranchDelete(ctx context.Context, repoDir, branch string, force bool) error
 	BranchRename(ctx context.Context, repoDir, from, to string) error
 	BranchExists(ctx context.Context, repoDir, branch string) bool
+	// InspectFast reads a worktree's branch and canonical repo path from the
+	// filesystem alone (no git subprocess). Both return "" when unreadable.
+	InspectFast(dir string) (branch, canonical string)
 	// WorktreeRepair fixes worktree registrations after a move. The moved
 	// worktrees' new paths must be passed explicitly: without them git can
 	// only repair the linked-to-main direction, leaving the canonical repo
@@ -104,6 +107,23 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
+// listMode is how much per-repo work a tree walk does. Everything above
+// listBare still walks the same marker-driven tree; the levels differ only in
+// what each workspace's Repos carry and how many git subprocesses that costs.
+type listMode int
+
+const (
+	// listBare: no repo information at all. Zero git subprocesses.
+	listBare listMode = iota
+	// listLight: repo names and branches, read from the filesystem (.git
+	// files). Zero git subprocesses.
+	listLight
+	// listFull: everything, including dirty / unpushed / stash state. Around
+	// five git subprocesses per worktree, one of which (`git status`) scales
+	// with repo size.
+	listFull
+)
+
 // List enumerates the workspace tree under WorkspacesDir, sorted by name.
 //
 // Top-level workspaces are returned; a project workspace carries its nested
@@ -113,22 +133,28 @@ func NewService(opts ServiceOptions) (*Service, error) {
 // Use Flatten on the result when you want every workspace regardless of
 // depth. Returns ErrNoWorkspacesDir if WorkspacesDir does not exist.
 func (s *Service) List(ctx context.Context) ([]Workspace, error) {
-	return s.list(ctx, true)
+	return s.list(ctx, listFull)
 }
 
-// ListShallow is List without per-repo git inspection: every Repos slice
-// comes back empty. Used by the interactive picker, where full inspection
-// (dirty / unpushed / stash counts on every worktree) would otherwise add a
-// multi-second pause before the picker appears.
+// ListLight is List with per-repo information limited to what the filesystem
+// can answer: repo names and branches, but no dirty / unpushed / stash state.
+// It runs no git subprocesses at all, so it is what `arat ls` uses by default
+// — full inspection is opt-in via `arat ls --status`.
+func (s *Service) ListLight(ctx context.Context) ([]Workspace, error) {
+	return s.list(ctx, listLight)
+}
+
+// ListShallow is List without any per-repo information: every Repos slice
+// comes back empty. Used by the interactive picker, which renders refs only.
 //
 // The tree itself is still walked in full — nesting is derived from the
 // workspace marker file, which costs one stat per directory and no git calls,
 // so the picker can still offer nested workspaces.
 func (s *Service) ListShallow(ctx context.Context) ([]Workspace, error) {
-	return s.list(ctx, false)
+	return s.list(ctx, listBare)
 }
 
-func (s *Service) list(ctx context.Context, inspect bool) ([]Workspace, error) {
+func (s *Service) list(ctx context.Context, mode listMode) ([]Workspace, error) {
 	entries, err := os.ReadDir(s.WorkspacesDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -146,7 +172,7 @@ func (s *Service) list(ctx context.Context, inspect bool) ([]Workspace, error) {
 		if info, err := e.Info(); err == nil {
 			modTime = info.ModTime()
 		}
-		ws, err := s.hydrateDir(ctx, "", e.Name(), filepath.Join(s.WorkspacesDir, e.Name()), modTime, inspect, 0)
+		ws, err := s.hydrateDir(ctx, "", e.Name(), filepath.Join(s.WorkspacesDir, e.Name()), modTime, mode, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +206,7 @@ func (s *Service) Get(ctx context.Context, ref string) (*Workspace, error) {
 		if full, err := s.resolveRefPath(ref); err == nil {
 			if info, statErr := os.Stat(full); statErr == nil && info.IsDir() &&
 				hasMeta(full) && !s.Git.IsWorktree(ctx, full) {
-				ws, err := s.hydrateDir(ctx, ParentRef(clean), filepath.Base(full), full, info.ModTime(), true, strings.Count(clean, "/"))
+				ws, err := s.hydrateDir(ctx, ParentRef(clean), filepath.Base(full), full, info.ModTime(), listFull, strings.Count(clean, "/"))
 				if err != nil {
 					return nil, err
 				}
@@ -191,7 +217,7 @@ func (s *Service) Get(ctx context.Context, ref string) (*Workspace, error) {
 
 	// Slow path: walk the tree without git inspection, then fully hydrate
 	// whatever matched.
-	items, err := s.list(ctx, false)
+	items, err := s.list(ctx, listBare)
 	if err != nil {
 		if errors.Is(err, ErrNoWorkspacesDir) {
 			return nil, fmt.Errorf("%w: %s", ErrNotFound, ref)
@@ -206,7 +232,7 @@ func (s *Service) Get(ctx context.Context, ref string) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, ref)
 	}
-	ws, err := s.hydrateDir(ctx, found.Parent, found.Name, found.Path, info.ModTime(), true, strings.Count(found.Ref, "/"))
+	ws, err := s.hydrateDir(ctx, found.Parent, found.Name, found.Path, info.ModTime(), listFull, strings.Count(found.Ref, "/"))
 	if err != nil {
 		return nil, err
 	}
@@ -272,9 +298,11 @@ func (e *ErrPrecondition) Error() string {
 // itself a worktree, whereas a repo's committed tree can legitimately contain
 // a .arat.toml at its root — the marker alone cannot tell those apart.
 //
-// When inspect is false, no git commands run at all: repos are left empty and
-// only the marker file drives recursion.
-func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, created time.Time, inspect bool, depth int) (Workspace, error) {
+// The mode decides how a worktree is recognised and what its RepoStatus
+// carries: listFull asks git and inspects state, listLight reads the .git
+// entry from the filesystem (names and branches, no state, no subprocesses),
+// listBare skips repos entirely and only the marker drives recursion.
+func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, created time.Time, mode listMode, depth int) (Workspace, error) {
 	meta, err := readMeta(full)
 	if err != nil {
 		return Workspace{}, err
@@ -308,21 +336,21 @@ func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, 
 			ws.TicketURL = renderTicketURL(s.TicketURL, ws.Ticket)
 		}
 	}
-	return ws, s.hydrateContents(ctx, &ws, inspect, depth)
+	return ws, s.hydrateContents(ctx, &ws, mode, depth)
 }
 
-// hydrateContents fills ws.Children and, when inspect is set, ws.Repos.
+// hydrateContents fills ws.Children and, when the mode reads repos, ws.Repos.
 //
 // The same walk serves projects and tasks: both can hold child workspaces
 // (a task's children are its sub-issues) and both can hold worktrees, so the
 // only thing that separates a subdirectory's two possible roles is the marker
 // file, not the kind of the workspace containing it.
-func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bool, depth int) error {
+func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, mode listMode, depth int) error {
 	// Single-repo workspace: the workspace dir itself is a git worktree, so
 	// its subdirs are the repo's own source tree rather than anything arat
 	// put there. Don't classify them.
-	if inspect && s.Git.IsWorktree(ctx, ws.Path) {
-		ws.Repos = append(ws.Repos, s.inspectAt(ctx, "", ws.Path))
+	if mode != listBare && s.isWorktreeFor(ctx, mode, ws.Path) {
+		ws.Repos = append(ws.Repos, s.repoStatusFor(ctx, mode, "", ws.Path))
 		return nil
 	}
 
@@ -342,10 +370,10 @@ func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bo
 		// even when the repo's own committed tree happens to contain a
 		// .arat.toml at its root. Classifying that repo as a child
 		// workspace would make Remove double-count its worktree. The
-		// inspect=false walk cannot afford git calls, so there the marker
-		// alone decides; the destructive paths all run with inspect=true.
-		if inspect && s.Git.IsWorktree(ctx, subPath) {
-			ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), subPath))
+		// listBare walk cannot afford the check, so there the marker alone
+		// decides; the destructive paths all run with listFull.
+		if mode != listBare && s.isWorktreeFor(ctx, mode, subPath) {
+			ws.Repos = append(ws.Repos, s.repoStatusFor(ctx, mode, sub.Name(), subPath))
 			continue
 		}
 
@@ -359,7 +387,7 @@ func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bo
 			if info, err := sub.Info(); err == nil {
 				modTime = info.ModTime()
 			}
-			child, err := s.hydrateDir(ctx, ws.Ref, sub.Name(), subPath, modTime, inspect, depth+1)
+			child, err := s.hydrateDir(ctx, ws.Ref, sub.Name(), subPath, modTime, mode, depth+1)
 			if err != nil {
 				return err
 			}
@@ -369,6 +397,34 @@ func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bo
 	}
 	sort.Slice(ws.Children, func(i, j int) bool { return ws.Children[i].Name < ws.Children[j].Name })
 	return nil
+}
+
+// isWorktreeFor is the mode-appropriate "is this directory a repo worktree"
+// check: listFull asks git, listLight settles for the presence of a .git
+// entry — the same first step IsWorktree takes before its git call.
+func (s *Service) isWorktreeFor(ctx context.Context, mode listMode, dir string) bool {
+	if mode == listFull {
+		return s.Git.IsWorktree(ctx, dir)
+	}
+	return fileOrDirExists(filepath.Join(dir, ".git"))
+}
+
+// repoStatusFor builds a RepoStatus at the mode's cost level.
+func (s *Service) repoStatusFor(ctx context.Context, mode listMode, name, path string) RepoStatus {
+	if mode == listFull {
+		return s.inspectAt(ctx, name, path)
+	}
+	branch, canonical := s.Git.InspectFast(path)
+	if name == "" {
+		// Single-repo layout: the directory is named for the workspace, so
+		// the repo's identity comes from its canonical clone.
+		if canonical != "" {
+			name = filepath.Base(canonical)
+		} else {
+			name = "(repo)"
+		}
+	}
+	return RepoStatus{Name: name, Path: path, Branch: branch}
 }
 
 // isCandidateSubdir filters the entries of a workspace dir down to those that

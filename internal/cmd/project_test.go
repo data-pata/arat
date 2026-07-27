@@ -557,3 +557,109 @@ func TestProjectUnlink(t *testing.T) {
 	assert.Equal(t, []string{"q3-billing"}, svc.unlinkCalls)
 	assert.Contains(t, r.stderr, "unlinked q3-billing")
 }
+
+// --- arat ls default vs --status --------------------------------------
+
+func TestLs_defaultIsLight(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{{Name: "x", Ref: "x"}}}
+	r := run(t, []string{"ls"}, nil, svc)
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, 1, svc.listLightCalls, "plain ls must use the no-git listing")
+	assert.Equal(t, 0, svc.listCalls)
+}
+
+func TestLs_statusFlagUsesFullInspection(t *testing.T) {
+	svc := &fakeService{listResult: []workspace.Workspace{{Name: "x", Ref: "x"}}}
+	r := run(t, []string{"ls", "--status"}, nil, svc)
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, 1, svc.listCalls)
+	assert.Equal(t, 0, svc.listLightCalls)
+}
+
+// A wrong invocation must show what right looks like, not just name the
+// mistake.
+func TestUsageErrors_carryUsageLine(t *testing.T) {
+	r := run(t, []string{"note"}, nil, &fakeService{})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "usage: arat note [name] <text...>")
+	assert.Contains(t, r.stderr, "see 'arat note --help'")
+
+	r = run(t, []string{"ls", "--bogus"}, nil, &fakeService{})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "unknown flag")
+	assert.Contains(t, r.stderr, "usage: arat ls")
+}
+
+// --- cwd inference for link / unlink / ticket attach -------------------
+
+func TestProjectLink_refInferredFromCwd(t *testing.T) {
+	svc := &fakeService{
+		projectAtRes: &workspace.Workspace{Name: "lidl", Ref: "lidl", Kind: workspace.KindProject},
+		linkResult:   &workspace.Workspace{Name: "lidl", Ref: "lidl", Path: "/p", Kind: workspace.KindProject},
+	}
+	lc := &fakeLinear{available: true, containerResult: []linear.Container{
+		{Kind: "project", ID: "slug-1", Name: "Lidl in Offers"},
+	}}
+	cwdFn := func() (string, error) { return "/ws/lidl/somewhere", nil }
+	r := runWithDeps(t, []string{"project", "link", "--project", "slug-1"}, nil, svc,
+		depsOpts{linear: lc, cwd: cwdFn})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.linkCalls, 1)
+	assert.Equal(t, "lidl", svc.linkCalls[0].Ref)
+	assert.Equal(t, []string{"/ws/lidl/somewhere"}, svc.projectAtCalls)
+}
+
+func TestProjectLink_noRefOutsideProject(t *testing.T) {
+	svc := &fakeService{}
+	lc := &fakeLinear{available: true, containerResult: []linear.Container{
+		{Kind: "project", ID: "slug-1", Name: "Billing"},
+	}}
+	cwdFn := func() (string, error) { return "/somewhere/else", nil }
+	r := runWithDeps(t, []string{"project", "link", "--project", "slug-1"}, nil, svc,
+		depsOpts{linear: lc, cwd: cwdFn})
+
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "pass the ref explicitly")
+	assert.Empty(t, svc.linkCalls)
+}
+
+func TestProjectUnlink_refInferredFromCwd(t *testing.T) {
+	svc := &fakeService{
+		projectAtRes: &workspace.Workspace{Name: "lidl", Ref: "lidl", Kind: workspace.KindProject},
+		unlinkResult: &workspace.Workspace{Name: "lidl", Ref: "lidl", Path: "/p", Kind: workspace.KindProject},
+	}
+	cwdFn := func() (string, error) { return "/ws/lidl", nil }
+	r := runWithDeps(t, []string{"project", "unlink"}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, []string{"lidl"}, svc.unlinkCalls)
+}
+
+func TestTicketAttach_workspaceInferredFromCwd(t *testing.T) {
+	svc := &fakeService{
+		workspaceAtRes: &workspace.Workspace{Name: "myfeat", Ref: "q3/myfeat"},
+		attachResult: &workspace.AttachResult{
+			Workspace: &workspace.Workspace{Name: "abc-1--myfeat", Ref: "q3/abc-1--myfeat", Path: "/p"},
+		},
+	}
+	cwdFn := func() (string, error) { return "/ws/q3/myfeat/repo-a", nil }
+	r := runWithDeps(t, []string{"ticket", "attach", "ABC-1"}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.attachCalls, 1)
+	assert.Equal(t, "q3/myfeat", svc.attachCalls[0].Name)
+	assert.Equal(t, "abc-1", svc.attachCalls[0].Ticket)
+}
+
+func TestTicketAttach_singleArgOutsideWorkspace(t *testing.T) {
+	svc := &fakeService{}
+	cwdFn := func() (string, error) { return "/somewhere/else", nil }
+	r := runWithDeps(t, []string{"ticket", "attach", "abc-1"}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "pass the ref explicitly")
+	assert.Empty(t, svc.attachCalls)
+}

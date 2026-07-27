@@ -113,6 +113,54 @@ func countStashesOnBranch(stashList, branch string) int {
 	return n
 }
 
+// InspectFast returns what can be read about the worktree at dir from the
+// filesystem alone, with no git subprocess: the checked-out branch ("" when
+// detached or unreadable) and the canonical repo path ("" when dir is the
+// canonical clone itself or the layout is unrecognised).
+//
+// It exists for listings: one `git status` per worktree makes `arat ls`
+// scale with worktree count times repo size, whereas two file reads make it
+// effectively free. Anything beyond branch and origin — dirtiness, unpushed
+// commits, stashes — genuinely needs git and stays in Inspect.
+func (g *Git) InspectFast(dir string) (branch, canonical string) {
+	gitPath := filepath.Join(dir, ".git")
+	fi, err := os.Stat(gitPath)
+	if err != nil {
+		return "", ""
+	}
+
+	headPath := filepath.Join(gitPath, "HEAD")
+	if !fi.IsDir() {
+		// A linked worktree: .git is a file "gitdir: <canonical>/.git/worktrees/<id>".
+		data, err := os.ReadFile(gitPath)
+		if err != nil {
+			return "", ""
+		}
+		line, _, _ := strings.Cut(strings.TrimSpace(string(data)), "\n")
+		gitdir, ok := strings.CutPrefix(line, "gitdir: ")
+		if !ok {
+			return "", ""
+		}
+		if !filepath.IsAbs(gitdir) {
+			gitdir = filepath.Join(dir, gitdir)
+		}
+		headPath = filepath.Join(gitdir, "HEAD")
+		if i := strings.LastIndex(filepath.ToSlash(gitdir), "/.git/worktrees/"); i >= 0 {
+			canonical = filepath.FromSlash(filepath.ToSlash(gitdir)[:i])
+		}
+	}
+
+	data, err := os.ReadFile(headPath)
+	if err != nil {
+		return "", canonical
+	}
+	head, _, _ := strings.Cut(strings.TrimSpace(string(data)), "\n")
+	if b, ok := strings.CutPrefix(head, "ref: refs/heads/"); ok {
+		branch = b
+	}
+	return branch, canonical
+}
+
 // IsWorktree returns true if dir is the root of a git worktree (i.e. dir
 // itself contains a `.git` file or directory). Subdirectories of a worktree
 // are NOT considered worktree roots even though `git rev-parse` would say

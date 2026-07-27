@@ -322,3 +322,42 @@ func TestContainerList_graphqlErrors(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "nope")
 }
+
+func TestContainerList_paginatesToCompletion(t *testing.T) {
+	// A workspace with more projects than one page: the entry the user
+	// wants may live on any page, so the list must follow the cursor.
+	rr := &recorderRunner{stdoutFn: func(args []string) []byte {
+		query := args[len(args)-1]
+		if !strings.Contains(query, "after:") {
+			return []byte(`{"data":{"projects":{
+				"pageInfo":{"hasNextPage":true,"endCursor":"cur-1"},
+				"nodes":[{"slugId":"slug-1","name":"Page One","url":"u1"}]}}}`)
+		}
+		require.Contains(t, query, `after: "cur-1"`)
+		return []byte(`{"data":{"projects":{
+			"pageInfo":{"hasNextPage":false,"endCursor":"cur-2"},
+			"nodes":[{"slugId":"slug-2","name":"Page Two","url":"u2"}]}}}`)
+	}}
+	l := NewWithRunner(rr.run())
+
+	got, err := l.ContainerList(t.Context(), ContainerProject)
+	require.NoError(t, err)
+	require.Len(t, rr.calls, 2, "one call per page")
+	assert.Equal(t, []Container{
+		{Kind: "project", ID: "slug-1", Name: "Page One", URL: "u1"},
+		{Kind: "project", ID: "slug-2", Name: "Page Two", URL: "u2"},
+	}, got)
+}
+
+func TestContainerList_nonAdvancingCursorTerminates(t *testing.T) {
+	// hasNextPage true forever with a stuck cursor must not loop.
+	rr := &recorderRunner{stdout: []byte(`{"data":{"projects":{
+		"pageInfo":{"hasNextPage":true,"endCursor":"stuck"},
+		"nodes":[{"slugId":"s","name":"N","url":"u"}]}}}`)}
+	l := NewWithRunner(rr.run())
+
+	got, err := l.ContainerList(t.Context(), ContainerProject)
+	require.NoError(t, err)
+	assert.Len(t, got, 2, "first page plus the one repeat before the stuck cursor is detected")
+	assert.Len(t, rr.calls, 2)
+}

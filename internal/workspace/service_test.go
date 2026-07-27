@@ -49,6 +49,12 @@ func (*fakeInspector) WorktreeRepair(context.Context, string, ...string) error {
 	panic("unused in List tests")
 }
 func (*fakeInspector) BranchExists(context.Context, string, string) bool { return false }
+func (f *fakeInspector) InspectFast(dir string) (string, string) {
+	if i, ok := f.insp[dir]; ok {
+		return i.Branch, f.canonical[dir]
+	}
+	return "", f.canonical[dir]
+}
 
 func TestService_List(t *testing.T) {
 	wsDir := t.TempDir()

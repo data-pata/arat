@@ -11,26 +11,33 @@ import (
 )
 
 func newLsCmd(s *state) *cobra.Command {
-	var flat bool
+	var (
+		flat   bool
+		status bool
+	)
 	c := &cobra.Command{
 		Use:   "ls",
-		Short: "List workspaces with status markers",
-		Long: `List all workspaces under the configured workspaces_dir.
+		Short: "List workspaces and their repos' branches",
+		Long: `List all workspaces under the configured workspaces_dir, with each repo's
+branch. This runs no git commands at all (branches are read straight from the
+filesystem), so it is fast regardless of repo count and size.
 
-For each workspace, prints each repo's branch and any of:
+With --status, each worktree is additionally inspected with git and marked:
   *dirty*     working tree has uncommitted changes
-  *unpushed*  commits ahead of upstream
-  *stashes:N* N stash entries
+  *unpushed*  commits on no upstream or remote branch
+  *stashes:N* N stash entries made on the worktree's branch
 
 Workspaces nested inside others are shown indented under their parent. With
 --flat, every workspace is listed at the top level under its full ref instead,
 which is easier to scan (and to grep) once trees get deep.
 
 With --json, emits an array of workspace objects (path, ticket, repos[],
-children[], etc). --flat --json emits one flat array of every workspace with
-children omitted — each workspace appears exactly once, at any depth.
+children[], etc). The dirty/unpushed/stashes fields are only meaningful with
+--status; without it they are always false/0. --flat --json emits one flat
+array of every workspace with children omitted — each workspace appears
+exactly once, at any depth.
 `,
-		Example: "  arat ls\n  arat ls --flat\n  arat ls --flat --json",
+		Example: "  arat ls\n  arat ls --status\n  arat ls --flat\n  arat ls --flat --json",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := s.loadConfig()
@@ -38,7 +45,11 @@ children omitted — each workspace appears exactly once, at any depth.
 				return err
 			}
 			svc := s.deps.NewService(cfg)
-			items, err := svc.List(cmd.Context())
+			list := svc.ListLight
+			if status {
+				list = svc.List
+			}
+			items, err := list(cmd.Context())
 			if err != nil {
 				if errors.Is(err, workspace.ErrNoWorkspacesDir) {
 					// No workspaces yet is not an error; print an informational note.
@@ -59,6 +70,7 @@ children omitted — each workspace appears exactly once, at any depth.
 		},
 	}
 	c.Flags().BoolVar(&flat, "flat", false, "list every workspace at the top level under its full ref, instead of as an indented tree")
+	c.Flags().BoolVarP(&status, "status", "s", false, "inspect every worktree with git and add *dirty* / *unpushed* / *stashes:N* markers (slower)")
 	return c
 }
 

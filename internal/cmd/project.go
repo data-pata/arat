@@ -38,9 +38,12 @@ func newProjectLinkCmd(s *state) *cobra.Command {
 	)
 
 	c := &cobra.Command{
-		Use:   "link <workspace-ref>",
+		Use:   "link [ref]",
 		Short: "Link a project workspace to a Linear project or initiative",
 		Long: `Attach a Linear project or initiative to a project workspace.
+
+Without a ref, the target is the project containing the current directory —
+running this from inside the project you want to link is the common case.
 
 With --project or --initiative, the value is matched against Linear by slug
 id first, then by name (case-insensitive); an ambiguous name is an error
@@ -53,10 +56,11 @@ required.
 The resolved name and URL are cached in the workspace's marker file so
 "arat ls" can show them without a network call.
 `,
-		Example: `  arat project link q3-billing
+		Example: `  arat project link                    # project from cwd, pick interactively
+  arat project link q3-billing
   arat project link q3-billing --project "Q3 Billing"
   arat project link q3-billing --initiative "Payments 2026"`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			kind, query, err := projectLinkTarget(projectName, initiativeName)
 			if err != nil {
@@ -77,6 +81,14 @@ The resolved name and URL are cached in the workspace's marker file so
 			// Linear access, so scripts get a stable exit 2.
 			if kind == "" && (!isInteractive(s.deps) || s.deps.PickContainer == nil) {
 				return &exitErr{code: ExitUsage, err: errors.New("one of --project or --initiative is required (or run in a terminal to pick interactively)")}
+			}
+
+			// Resolve the target before any Linear round-trips, so a wrong
+			// ref (or not standing in a project) fails fast.
+			svc := s.deps.NewService(cfg)
+			ref, err := projectRefFromArgsOrCwd(cmd, s, svc, args)
+			if err != nil {
+				return err
 			}
 
 			lc := s.deps.NewLinear()
@@ -103,9 +115,8 @@ The resolved name and URL are cached in the workspace's marker file so
 				}
 			}
 
-			svc := s.deps.NewService(cfg)
 			ws, err := svc.LinkLinear(cmd.Context(), workspace.LinkOptions{
-				Ref: args[0],
+				Ref: ref,
 				Linear: workspace.LinearRef{
 					Kind: match.Kind,
 					ID:   match.ID,
@@ -119,8 +130,9 @@ The resolved name and URL are cached in the workspace's marker file so
 
 			s.writer().JSONRecord(ws, func(out io.Writer) {
 				fmt.Fprintf(out, "%s\n", ws.Path)
-				fmt.Fprintf(s.deps.Stderr, "linked %s → %s %q (%s)\n", ws.Ref, match.Kind, match.Name, match.URL)
 			})
+			// Outside the JSON closure so --json does not swallow it.
+			fmt.Fprintf(s.deps.Stderr, "linked %s → %s %q (%s)\n", ws.Ref, match.Kind, match.Name, match.URL)
 			return nil
 		},
 	}
@@ -129,24 +141,54 @@ The resolved name and URL are cached in the workspace's marker file so
 	return c
 }
 
+// projectRefFromArgsOrCwd resolves which project workspace a link/unlink
+// targets: the explicit ref when given, otherwise the nearest project
+// containing the current directory.
+func projectRefFromArgsOrCwd(cmd *cobra.Command, s *state, svc Service, args []string) (string, error) {
+	if len(args) == 1 {
+		return args[0], nil
+	}
+	if s.deps.Cwd == nil {
+		return "", &exitErr{code: ExitUsage, err: errors.New("no project ref given and cwd resolver not configured — pass the ref explicitly")}
+	}
+	cwd, err := s.deps.Cwd()
+	if err != nil {
+		return "", &exitErr{code: ExitUsage, err: err}
+	}
+	project, err := svc.ProjectAt(cmd.Context(), cwd)
+	if err != nil {
+		return "", &exitErr{code: ExitUsage, err: fmt.Errorf("no project ref given and %w — pass the ref explicitly", err)}
+	}
+	if project == nil {
+		return "", &exitErr{code: ExitUsage, err: errors.New("no project ref given and the current directory is not inside a project — pass the ref explicitly")}
+	}
+	return project.Ref, nil
+}
+
 func newProjectUnlinkCmd(s *state) *cobra.Command {
 	return &cobra.Command{
-		Use:   "unlink <workspace-ref>",
+		Use:   "unlink [ref]",
 		Short: "Remove a project workspace's Linear link",
 		Long: `Detach the Linear project or initiative from a project workspace.
+
+Without a ref, the target is the project containing the current directory.
 
 The workspace itself and everything nested inside it are untouched. Unlinking
 a project that is not linked succeeds and does nothing.
 `,
-		Example: "  arat project unlink q3-billing",
-		Args:    cobra.ExactArgs(1),
+		Example: "  arat project unlink\n  arat project unlink q3-billing",
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := s.loadConfig()
 			if err != nil {
 				return err
 			}
 			svc := s.deps.NewService(cfg)
-			ws, err := svc.UnlinkLinear(cmd.Context(), args[0])
+			ref, err := projectRefFromArgsOrCwd(cmd, s, svc, args)
+			if err != nil {
+				return err
+			}
+			ws, err := svc.UnlinkLinear(cmd.Context(), ref)
 			if err != nil {
 				return mapProjectError(err)
 			}

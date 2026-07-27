@@ -22,9 +22,13 @@ func newTicketCmd(s *state) *cobra.Command {
 
 func newTicketAttachCmd(s *state) *cobra.Command {
 	return &cobra.Command{
-		Use:   "attach <name> <ticket>",
+		Use:   "attach [ref] <ticket>",
 		Short: "Attach a ticket to an existing ticketless workspace",
 		Long: `Attach a Linear ticket to a workspace that was created without one.
+
+With only a ticket argument, the workspace is the one containing the current
+directory — attaching a ticket to the workspace you are standing in is the
+common case.
 
 Renames the workspace directory from "<short>" to "<ticket>--<short>",
 renames every worktree's branch from "<prefix>--<short>" to
@@ -37,24 +41,38 @@ that have been moved off the original branch (e.g. you checked out a
 different branch) are reported as warnings and left alone — fix
 those manually.
 `,
-		Example: `  arat ticket attach my-feat abc-123
+		Example: `  arat ticket attach abc-123           # workspace inferred from cwd
+  arat ticket attach my-feat abc-123
   arat ticket attach experimental-spike abc-9999`,
-		Args: cobra.ExactArgs(2),
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := s.loadConfig()
 			if err != nil {
 				return err
 			}
 			svc := s.deps.NewService(cfg)
+
+			var name, ticket string
+			if len(args) == 2 {
+				name, ticket = args[0], args[1]
+			} else {
+				ticket = args[0]
+				ws, err := workspaceFromCwd(cmd.Context(), svc, s.deps.Cwd)
+				if err != nil {
+					return &exitErr{code: ExitUsage, err: fmt.Errorf("no workspace ref given and %w — pass the ref explicitly", err)}
+				}
+				name = ws.Ref
+			}
+
 			res, err := svc.AttachTicket(cmd.Context(), workspace.AttachOptions{
-				Name:   args[0],
-				Ticket: strings.ToLower(args[1]),
+				Name:   name,
+				Ticket: strings.ToLower(ticket),
 			})
 			if err != nil {
 				return mapAttachError(err)
 			}
 			fmt.Fprintf(s.deps.Stdout, "%s\n", res.Workspace.Path)
-			fmt.Fprintf(s.deps.Stderr, "attached %s → %s\n", strings.ToUpper(args[1]), res.Workspace.Name)
+			fmt.Fprintf(s.deps.Stderr, "attached %s → %s\n", strings.ToUpper(ticket), res.Workspace.Name)
 			for _, w := range res.Warnings {
 				fmt.Fprintf(s.deps.Stderr, "  ⚠ %s: %s\n", w.Repo, w.Reason)
 			}

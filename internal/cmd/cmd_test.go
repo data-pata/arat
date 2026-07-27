@@ -48,6 +48,8 @@ type fakeService struct {
 	unlinkErr        error
 
 	getCalls         []string
+	listCalls        int
+	listLightCalls   int
 	newCalls         []workspace.NewOptions
 	removeCalls      []workspace.RemoveOptions
 	attachCalls      []workspace.AttachOptions
@@ -66,6 +68,11 @@ type moveSessionCall struct {
 }
 
 func (f *fakeService) List(_ context.Context) ([]workspace.Workspace, error) {
+	f.listCalls++
+	return f.listResult, f.listErr
+}
+func (f *fakeService) ListLight(_ context.Context) ([]workspace.Workspace, error) {
+	f.listLightCalls++
 	return f.listResult, f.listErr
 }
 func (f *fakeService) ListShallow(_ context.Context) ([]workspace.Workspace, error) {

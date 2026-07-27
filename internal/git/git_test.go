@@ -247,3 +247,30 @@ func TestInspect_stashesAttributedToBranch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, wt.Stashes, "the stash was made on main, not on other-branch")
 }
+
+func TestInspectFast(t *testing.T) {
+	canonical := initRepo(t)
+	wt := filepath.Join(t.TempDir(), "wt")
+	mustGit(t, canonical, "worktree", "add", "-b", "feat-x", wt, "HEAD")
+
+	g := New()
+
+	branch, canon := g.InspectFast(wt)
+	assert.Equal(t, "feat-x", branch)
+	assert.Equal(t, canonical, canon)
+
+	// The canonical clone itself: branch readable, no canonical parent.
+	branch, canon = g.InspectFast(canonical)
+	assert.Equal(t, "main", branch)
+	assert.Empty(t, canon)
+
+	// Detached HEAD reads as no branch.
+	mustGit(t, wt, "checkout", "--detach")
+	branch, _ = g.InspectFast(wt)
+	assert.Empty(t, branch)
+
+	// Not a repo at all.
+	branch, canon = g.InspectFast(t.TempDir())
+	assert.Empty(t, branch)
+	assert.Empty(t, canon)
+}

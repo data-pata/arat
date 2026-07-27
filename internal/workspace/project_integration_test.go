@@ -649,3 +649,28 @@ func TestGet_topLevelDoesNotShadowNested(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "p/dupe", got.Ref)
 }
+
+// The default listing must answer from the filesystem alone: names, refs,
+// and branches are all present, while state that needs git subprocesses
+// (dirty and friends) is deliberately absent even when true on disk.
+func TestListLight_branchesWithoutGitState(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	ws, err := svc.New(ctx, NewOptions{ShortName: "feat", Ticket: "abc-1", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(ws.Path, "repo-a", "dirty.txt"), []byte("x"), 0o644))
+
+	light, err := svc.ListLight(ctx)
+	require.NoError(t, err)
+	require.Len(t, light, 1)
+	require.Len(t, light[0].Repos, 1)
+	assert.Equal(t, "repo-a", light[0].Repos[0].Name)
+	assert.Equal(t, "ps--feat--abc-1", light[0].Repos[0].Branch)
+	assert.False(t, light[0].Repos[0].Dirty, "light mode does not run git, so state is unavailable")
+
+	full, err := svc.List(ctx)
+	require.NoError(t, err)
+	assert.True(t, full[0].Repos[0].Dirty, "full mode sees the same tree as dirty")
+}

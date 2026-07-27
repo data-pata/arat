@@ -89,6 +89,9 @@ type RepoFlowResult struct {
 // Service is the workspace-domain surface the commands need.
 type Service interface {
 	List(ctx context.Context) ([]workspace.Workspace, error)
+	// ListLight is List with repo names and branches only, read from the
+	// filesystem — no git subprocesses, no dirty/unpushed/stash state.
+	ListLight(ctx context.Context) ([]workspace.Workspace, error)
 	ListShallow(ctx context.Context) ([]workspace.Workspace, error)
 	Get(ctx context.Context, ref string) (*workspace.Workspace, error)
 	New(ctx context.Context, opts workspace.NewOptions) (*workspace.Workspace, error)
@@ -183,21 +186,24 @@ Exit codes:
 	// Cobra-detected problems — unknown flags, wrong argument counts — are
 	// usage errors and must exit 2 like arat's own validation, not fall
 	// through to the generic 1. Flag errors route through FlagErrorFunc;
-	// Args validators are wrapped per command.
-	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return &exitErr{code: ExitUsage, err: err}
+	// Args validators are wrapped per command. Both carry the command's
+	// usage line: "requires at least 1 arg(s)" alone tells the user they
+	// are wrong without telling them what right looks like.
+	root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return &exitErr{code: ExitUsage, err: withUsageHint(cmd, err)}
 	})
 	wrapArgsAsUsageErrors(root)
 	return root
 }
 
 // wrapArgsAsUsageErrors wraps every command's positional-args validator so a
-// failure carries ExitUsage instead of the generic exit code.
+// failure carries ExitUsage instead of the generic exit code, along with the
+// command's usage line.
 func wrapArgsAsUsageErrors(c *cobra.Command) {
 	if orig := c.Args; orig != nil {
 		c.Args = func(cmd *cobra.Command, args []string) error {
 			if err := orig(cmd, args); err != nil {
-				return &exitErr{code: ExitUsage, err: err}
+				return &exitErr{code: ExitUsage, err: withUsageHint(cmd, err)}
 			}
 			return nil
 		}
@@ -205,6 +211,19 @@ func wrapArgsAsUsageErrors(c *cobra.Command) {
 	for _, sub := range c.Commands() {
 		wrapArgsAsUsageErrors(sub)
 	}
+}
+
+// withUsageHint appends the failing command's usage line and a --help pointer
+// to a usage error, so the message both names the mistake and shows the shape
+// that was expected.
+func withUsageHint(cmd *cobra.Command, err error) error {
+	return fmt.Errorf("%w\nusage: %s\nsee 'arat %s --help'", err, cmd.UseLine(), commandPathTail(cmd))
+}
+
+// commandPathTail is the command's path without the root name ("project
+// link"), for composing "arat project link --help".
+func commandPathTail(cmd *cobra.Command) string {
+	return strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
 }
 
 type state struct {
@@ -239,6 +258,20 @@ func (s *state) loadConfig() (*config.Config, error) {
 		return nil, &exitErr{code: ExitConfig, err: err}
 	}
 	return cfg, nil
+}
+
+// workspaceFromCwd resolves the workspace containing the current directory,
+// for commands whose ref argument is optional because "the workspace I am
+// standing in" is the common case.
+func workspaceFromCwd(ctx context.Context, svc Service, cwdFn func() (string, error)) (*workspace.Workspace, error) {
+	if cwdFn == nil {
+		return nil, errors.New("cwd resolver not configured")
+	}
+	cwd, err := cwdFn()
+	if err != nil {
+		return nil, err
+	}
+	return svc.WorkspaceAt(ctx, cwd)
 }
 
 // exitErr wraps an error with the exit code arat should return.

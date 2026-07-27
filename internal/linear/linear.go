@@ -233,8 +233,18 @@ type ContainerLister interface {
 	ContainerList(ctx context.Context, kind string) ([]Container, error)
 }
 
+// containerMaxPages caps ContainerList's pagination loop. At 250 nodes per
+// page this allows 5000 containers, far beyond any real workspace, while
+// bounding the damage if the API ever returned a non-advancing cursor.
+const containerMaxPages = 20
+
 // ContainerList returns every Linear project or initiative the authenticated
 // viewer can see, depending on kind.
+//
+// The list is paginated to completion: a large workspace holds far more than
+// one page of projects (Kivra has 550+), and the picker built on this list
+// silently missing an entry is indistinguishable from the project not
+// existing.
 //
 // As with IssueList this goes through `linear api` rather than
 // `linear project list` — the CLI's table output is not designed for
@@ -250,42 +260,60 @@ func (l *Linear) ContainerList(ctx context.Context, kind string) ([]Container, e
 		return nil, fmt.Errorf("unknown container kind %q (want %q or %q)", kind, ContainerProject, ContainerInitiative)
 	}
 
-	query := fmt.Sprintf(`{
-  %s(first: 250) {
+	var out []Container
+	cursor := ""
+	for range containerMaxPages {
+		after := ""
+		if cursor != "" {
+			// The cursor is an opaque token from the previous response;
+			// %q escapes it safely into the query string.
+			after = fmt.Sprintf(", after: %q", cursor)
+		}
+		query := fmt.Sprintf(`{
+  %s(first: 250%s) {
+    pageInfo { hasNextPage endCursor }
     nodes { slugId name url }
   }
-}`, root)
+}`, root, after)
 
-	stdout, stderr, err := l.run(ctx, "linear", "api", query)
-	if err != nil {
-		return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
-	}
+		stdout, stderr, err := l.run(ctx, "linear", "api", query)
+		if err != nil {
+			return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+		}
 
-	var resp struct {
-		Data map[string]struct {
-			Nodes []struct {
-				SlugID string `json:"slugId"`
-				Name   string `json:"name"`
-				URL    string `json:"url"`
-			} `json:"nodes"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
-	}
-	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
-	}
+		var resp struct {
+			Data map[string]struct {
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+				Nodes []struct {
+					SlugID string `json:"slugId"`
+					Name   string `json:"name"`
+					URL    string `json:"url"`
+				} `json:"nodes"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal(stdout, &resp); err != nil {
+			return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+		}
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+		}
 
-	nodes := resp.Data[root].Nodes
-	out := make([]Container, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, Container{Kind: kind, ID: n.SlugID, Name: n.Name, URL: n.URL})
+		data := resp.Data[root]
+		for _, n := range data.Nodes {
+			out = append(out, Container{Kind: kind, ID: n.SlugID, Name: n.Name, URL: n.URL})
+		}
+		if !data.PageInfo.HasNextPage || data.PageInfo.EndCursor == "" || data.PageInfo.EndCursor == cursor {
+			return out, nil
+		}
+		cursor = data.PageInfo.EndCursor
 	}
-	return out, nil
+	return nil, fmt.Errorf("linear api: %s pagination did not terminate after %d pages", root, containerMaxPages)
 }
 
 // CommentAddOptions controls CommentAdd.
