@@ -239,22 +239,40 @@ default_repos and auto_repos_glob.
 
 			s.writer().JSONRecord(ws, func(out io.Writer) {
 				fmt.Fprintf(out, "%s\n", ws.Path)
-				fmt.Fprintf(s.deps.Stderr, "created workspace %s\n", ws.Name)
-				if ws.TicketURL != "" {
-					fmt.Fprintf(s.deps.Stderr, "  ticket: %s\n", ws.TicketURL)
-				}
-				fmt.Fprintf(s.deps.Stderr, "  repos:  %d\n", len(ws.Repos))
-				for _, r := range ws.Repos {
+			})
+
+			// The summary and any warnings go to stderr in BOTH output
+			// modes. Tucking them inside the text closure above would make
+			// --json silently swallow failures (a bad --carry-session id
+			// would vanish), and the summary is where a wrong parent or a
+			// wrong base — the two mistakes nesting makes possible — has to
+			// become visible: hence the full ref and the per-repo base.
+			created := ws.Ref
+			if created == "" {
+				created = ws.Name
+			}
+			fmt.Fprintf(s.deps.Stderr, "created workspace %s\n", created)
+			if ws.Kind == workspace.KindProject {
+				fmt.Fprintf(s.deps.Stderr, "  kind:   project (holds other workspaces; worktrees are opt-in)\n")
+			}
+			if ws.TicketURL != "" {
+				fmt.Fprintf(s.deps.Stderr, "  ticket: %s\n", ws.TicketURL)
+			}
+			fmt.Fprintf(s.deps.Stderr, "  repos:  %d\n", len(ws.Repos))
+			for _, r := range ws.Repos {
+				if r.Base != "" {
+					fmt.Fprintf(s.deps.Stderr, "    %s → %s (off %s)\n", r.Name, r.Branch, r.Base)
+				} else {
 					fmt.Fprintf(s.deps.Stderr, "    %s → %s\n", r.Name, r.Branch)
 				}
-				if carrySession != "" {
-					if carryErr != nil {
-						fmt.Fprintf(s.deps.Stderr, "  ⚠ carry-session %s: %v\n", carrySession, carryErr)
-					} else {
-						fmt.Fprintf(s.deps.Stderr, "  carried session: %s → %s\n", carrySrc, carryDst)
-					}
+			}
+			if carrySession != "" {
+				if carryErr != nil {
+					fmt.Fprintf(s.deps.Stderr, "  ⚠ carry-session %s: %v\n", carrySession, carryErr)
+				} else {
+					fmt.Fprintf(s.deps.Stderr, "  carried session: %s → %s\n", carrySrc, carryDst)
 				}
-			})
+			}
 			return nil
 		},
 	}
@@ -263,13 +281,13 @@ default_repos and auto_repos_glob.
 	c.Flags().StringVar(&newTicket, "new-ticket", "", "create a new Linear ticket with this title, then attach it (mutually exclusive with --ticket/--no-ticket)")
 	c.Flags().StringVar(&newTicketDescription, "new-ticket-description", "", "description body for --new-ticket (supports multi-line content)")
 	c.Flags().StringSliceVar(&repos, "repos", nil, "comma-separated repo names; defaults to default_repos + auto_repos_glob from config")
-	c.Flags().BoolVar(&fromCurrent, "from-current", false, "branch new worktrees off the parent workspace's feature branches (parent inferred from cwd) instead of origin/HEAD")
+	c.Flags().BoolVar(&fromCurrent, "from-current", false, "branch new worktrees off the branches of the workspace you are standing in (a spin-off; contrast --from-parent, which stacks on the workspace this one is created inside)")
 	c.Flags().BoolVar(&carryContext, "carry-context", false, "seed the new CLAUDE.md with a 'Spun off from <parent>' header")
 	c.Flags().StringVar(&carrySession, "carry-session", "", "Claude Code session id (e.g. 2bba4a38-93e1-...) to move into the new workspace's project dir so /resume finds it after cd")
 	c.Flags().BoolVar(&codeWorkspace, "code-workspace", false, "generate a .code-workspace file (also enabled by config generate_code_workspace)")
 	c.Flags().BoolVar(&projectMode, "project", false, "create a project workspace: a container for other workspaces, with no worktrees unless --repos is given")
 	c.Flags().StringVar(&in, "in", "", "ref of the workspace to create this one inside, or \".\" for the workspace containing cwd (default: the project containing cwd, if any)")
-	c.Flags().BoolVar(&fromParent, "from-parent", false, "branch new worktrees off the containing workspace's own branches instead of the default base")
+	c.Flags().BoolVar(&fromParent, "from-parent", false, "branch new worktrees off the containing workspace's own branches instead of the default base (contrast --from-current, which branches off the workspace you are standing in)")
 	return c
 }
 

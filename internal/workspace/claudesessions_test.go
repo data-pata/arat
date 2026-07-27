@@ -297,3 +297,34 @@ func TestMoveSessionsForRename_nestedSiblingCollisionStillGuarded(t *testing.T) 
 	assert.DirExists(t, filepath.Join(root, siblingEnc))
 	assert.DirExists(t, filepath.Join(root, siblingEnc+"-internal"))
 }
+
+func TestMoveSessionsForRename_hyphenatedNameCollisionIsNotHijacked(t *testing.T) {
+	// Claude's cwd encoding collapses both "/" and "." to "-", so the
+	// nested path <ws>/p/foo and the top-level workspace <ws>/p-foo encode
+	// to the same session dir. Renaming p/foo must not take that shared
+	// dir with it — p-foo's sessions live there too — and the skip has to
+	// be said out loud, since p/foo's own root sessions stay behind.
+	wsDir := t.TempDir()
+	proj := filepath.Join(wsDir, "p")
+	require.NoError(t, os.MkdirAll(proj, 0o755))
+	require.NoError(t, writeMeta(proj, Meta{Kind: KindProject}))
+	oldPath := filepath.Join(proj, "foo")
+	newPath := filepath.Join(proj, "abc-1--foo")
+	require.NoError(t, os.MkdirAll(newPath, 0o755))
+	require.NoError(t, writeMeta(newPath, Meta{Kind: KindTask}))
+	// The colliding top-level workspace.
+	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "p-foo"), 0o755))
+
+	oldEnc := EncodeCwdAsProjectDir(oldPath) // == EncodeCwdAsProjectDir(<ws>/p-foo)
+	require.Equal(t, oldEnc, EncodeCwdAsProjectDir(filepath.Join(wsDir, "p-foo")))
+	root := claudeRig(t, oldEnc)
+
+	s := &Service{WorkspacesDir: wsDir, ClaudeProjectsDir: root}
+	warnings := s.MoveSessionsForRename(oldPath, newPath)
+
+	// The shared dir stays where it is, and the skip is reported.
+	assert.DirExists(t, filepath.Join(root, oldEnc))
+	assert.NoDirExists(t, filepath.Join(root, EncodeCwdAsProjectDir(newPath)))
+	require.Len(t, warnings, 1)
+	assert.Contains(t, warnings[0].Reason, "encodes to the same session dir")
+}

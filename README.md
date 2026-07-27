@@ -92,9 +92,9 @@ default_team  = "ABC"
 | `arat config init [--force] / path` | Write / resolve the config file. |
 | `arat version` | Version + git sha. |
 
-`--json` is honoured on `ls`, `new`, `ticket create` (where structured output
-is useful). All other commands write results to stdout, operational messages
-to stderr.
+`--json` is honoured on `ls`, `new`, `go`, `rm`, `repo add`, `ticket create`,
+and `project link|unlink`. All commands write results to stdout, operational
+messages to stderr.
 
 ## Exit codes
 
@@ -171,7 +171,10 @@ Things worth knowing:
   `workspaces_dir`, e.g. `q3-billing/abc-12--invoice-pdf/abc-18--fonts`. A
   bare directory name also works when it is unique across the tree, so
   `arat go abc-18--fonts` finds it at any depth. An ambiguous bare name is an
-  error listing the full refs rather than a guess.
+  error listing the full refs rather than a guess — including when one of the
+  candidates is a top-level workspace, whose ref is the bare name itself.
+  `./<ref>` matches a ref exactly, which is how that top-level workspace is
+  addressed while a nested one shares its name.
 - **`arat new` inside a task gives you a sibling, not a sub-issue.** Standing
   in a task workspace is the ordinary state of working in one, so cwd
   inference walks up to the containing project. A sub-issue is asked for

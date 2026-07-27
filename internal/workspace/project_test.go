@@ -397,7 +397,12 @@ func TestService_LinkLinear(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidInput)
 }
 
-func TestResolve_exactRefBeatsBareNameCollision(t *testing.T) {
+// A top-level workspace's ref is indistinguishable from a bare name, so a
+// same-named nested workspace makes the query ambiguous — silently preferring
+// the top-level one would let `arat rm fix` delete it while the user meant
+// proj/fix. The anchored ./ form is the escape hatch that pins the top-level
+// workspace, whose ref no other query can reach.
+func TestResolve_topLevelDoesNotShadowNestedName(t *testing.T) {
 	items := []Workspace{
 		{Name: "fix", Ref: "fix"},
 		{Name: "proj", Ref: "proj", Kind: KindProject, Children: []Workspace{
@@ -405,9 +410,13 @@ func TestResolve_exactRefBeatsBareNameCollision(t *testing.T) {
 		}},
 	}
 
-	// "fix" matches the top-level workspace by exact ref, so it is not
-	// reported as ambiguous against proj/fix.
-	got, err := Resolve(items, "fix")
+	_, err := Resolve(items, "fix")
+	var amb *ErrAmbiguous
+	require.ErrorAs(t, err, &amb)
+	assert.Equal(t, []string{"fix", "proj/fix"}, amb.Matches)
+	assert.Contains(t, amb.Error(), "./fix", "the error must name the working escape hatch")
+
+	got, err := Resolve(items, "./fix")
 	require.NoError(t, err)
 	assert.Equal(t, "fix", got.Ref)
 
@@ -417,4 +426,20 @@ func TestResolve_exactRefBeatsBareNameCollision(t *testing.T) {
 
 	_, err = Resolve(items, "missing")
 	assert.True(t, errors.Is(err, ErrNotFound))
+}
+
+// A failed full ref whose last segment names a real workspace gets pointed at
+// the actual ref instead of a bare not-found.
+func TestResolve_didYouMeanOnWrongMiddleSegment(t *testing.T) {
+	items := []Workspace{
+		{Name: "proj", Ref: "proj", Kind: KindProject, Children: []Workspace{
+			{Name: "abc-12--pdf", Ref: "proj/abc-12--pdf", Parent: "proj", Children: []Workspace{
+				{Name: "abc-18--fonts", Ref: "proj/abc-12--pdf/abc-18--fonts", Parent: "proj/abc-12--pdf"},
+			}},
+		}},
+	}
+
+	_, err := Resolve(items, "proj/abc-18--fonts")
+	require.ErrorIs(t, err, ErrNotFound)
+	assert.Contains(t, err.Error(), "did you mean proj/abc-12--pdf/abc-18--fonts?")
 }

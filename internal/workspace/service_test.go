@@ -45,9 +45,10 @@ func (*fakeInspector) BranchDelete(context.Context, string, string, bool) error 
 func (*fakeInspector) BranchRename(context.Context, string, string, string) error {
 	panic("unused in List tests")
 }
-func (*fakeInspector) WorktreeRepair(context.Context, string) error {
+func (*fakeInspector) WorktreeRepair(context.Context, string, ...string) error {
 	panic("unused in List tests")
 }
+func (*fakeInspector) BranchExists(context.Context, string, string) bool { return false }
 
 func TestService_List(t *testing.T) {
 	wsDir := t.TempDir()

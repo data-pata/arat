@@ -96,7 +96,9 @@ func readMeta(dir string) (*Meta, error) {
 }
 
 // writeMeta writes MetaFile into a workspace directory, replacing any
-// existing file.
+// existing file. The write goes through a temp file plus rename: a malformed
+// marker is a loud error on every subsequent read (see readMeta), so a crash
+// mid-write must not be able to leave a truncated one behind.
 func writeMeta(dir string, m Meta) error {
 	if m.Kind == "" {
 		m.Kind = KindTask
@@ -106,7 +108,23 @@ func writeMeta(dir string, m Meta) error {
 		return fmt.Errorf("encode %s: %w", MetaFile, err)
 	}
 	header := "# arat workspace marker. Managed by arat; safe to read.\n"
-	return os.WriteFile(filepath.Join(dir, MetaFile), append([]byte(header), data...), 0o644)
+
+	tmp, err := os.CreateTemp(dir, MetaFile+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("write %s: %w", MetaFile, err)
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append([]byte(header), data...)); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write %s: %w", MetaFile, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("write %s: %w", MetaFile, err)
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", MetaFile, err)
+	}
+	return os.Rename(tmp.Name(), filepath.Join(dir, MetaFile))
 }
 
 // hasMeta reports whether dir carries the workspace marker file. Used when

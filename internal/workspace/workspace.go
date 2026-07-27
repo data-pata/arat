@@ -58,9 +58,13 @@ func (w Workspace) IsProject() bool { return w.Kind == KindProject }
 
 // RepoStatus is the inspection of one worktree inside a workspace.
 type RepoStatus struct {
-	Name     string `json:"name"`
-	Path     string `json:"path"`
-	Branch   string `json:"branch"` // "" if detached
+	Name   string `json:"name"`
+	Path   string `json:"path"`
+	Branch string `json:"branch"` // "" if detached
+	// Base is the ref the branch was created from. Only populated on the
+	// result of Service.New — it is not recorded on disk, so inspections
+	// (ls) cannot recover it.
+	Base     string `json:"base,omitempty"`
 	Dirty    bool   `json:"dirty"`
 	Unpushed bool   `json:"unpushed"`
 	Stashes  int    `json:"stashes"`

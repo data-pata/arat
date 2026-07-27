@@ -48,8 +48,12 @@ several positional args; they're joined with single spaces.
 
 			ws, err := svc.Get(cmd.Context(), ref)
 			if err != nil {
-				if errors.Is(err, workspace.ErrNotFound) {
+				var ambiguous *workspace.ErrAmbiguous
+				switch {
+				case errors.Is(err, workspace.ErrNotFound):
 					return &exitErr{code: ExitNotFound, err: err}
+				case errors.As(err, &ambiguous):
+					return &exitErr{code: ExitUsage, err: err}
 				}
 				return &exitErr{code: ExitExternal, err: err}
 			}

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 
 	"github.com/data-pata/arat/internal/workspace"
@@ -56,12 +57,20 @@ default today.
 
 			ws, err := svc.Get(cmd.Context(), args[0])
 			if err != nil {
-				if errors.Is(err, workspace.ErrNotFound) {
+				var ambiguous *workspace.ErrAmbiguous
+				switch {
+				case errors.Is(err, workspace.ErrNotFound):
 					return &exitErr{code: ExitNotFound, err: err}
+				case errors.As(err, &ambiguous):
+					// An ambiguous name is the caller's to fix, not an
+					// external tool flaking — exit 2, matching rm.
+					return &exitErr{code: ExitUsage, err: err}
 				}
 				return &exitErr{code: ExitExternal, err: err}
 			}
-			fmt.Fprintln(s.deps.Stdout, ws.Path)
+			s.writer().JSONRecord(ws, func(out io.Writer) {
+				fmt.Fprintln(out, ws.Path)
+			})
 			return nil
 		},
 	}
@@ -96,6 +105,13 @@ func (s *state) runPicker(cmd *cobra.Command, svc Service) error {
 // The trade-off is that the picker can't show dirty / unpushed / stash
 // counts — `arat ls` is the place for those.
 func (s *state) pickWorkspaceInteractive(cmd *cobra.Command, svc Service) (*workspace.Workspace, error) {
+	// Outside a terminal there is no one to pick, and the picker's
+	// cancel-equals-success convention would turn the missing argument into
+	// a silent exit 0 — for `arat go` that means `cd "$(arat go)"` quietly
+	// going to $HOME. Fail as the usage error it is.
+	if !isInteractive(s.deps) {
+		return nil, &exitErr{code: ExitUsage, err: errors.New("a workspace ref is required outside a terminal")}
+	}
 	if s.deps.PickWorkspace == nil {
 		return nil, &exitErr{code: ExitUsage, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
 	}

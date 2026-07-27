@@ -104,30 +104,21 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 		return nil, fmt.Errorf("rename %s → %s: %w", current.Path, newPath, err)
 	}
 
-	// 3. Repair worktree pointers in each canonical repo so `git status` etc.
-	//    work from the new path. We collect the canonical repo from the new
-	//    location since the worktrees themselves moved.
-	repaired := map[string]struct{}{}
-	for _, r := range current.Repos {
-		newRepoPath := filepath.Join(newPath, filepath.Base(r.Path))
-		canonical := s.Git.CanonicalRepoPath(ctx, newRepoPath)
-		if canonical == "" {
-			// single-repo workspaces have empty subpath segment
-			canonical = s.Git.CanonicalRepoPath(ctx, newPath)
-		}
-		if canonical == "" || canonical == newRepoPath || canonical == newPath {
-			continue
-		}
-		if _, done := repaired[canonical]; done {
-			continue
-		}
-		if err := s.Git.WorktreeRepair(ctx, canonical); err != nil {
+	// 3. Repair worktree registrations in each canonical repo so `git
+	//    status` (and later `arat rm`) work from the new path. Two things
+	//    matter here: git must be handed each moved worktree's NEW path
+	//    (repair without paths only fixes the linked-to-main direction, so
+	//    the canonical repo would keep pointing at the old, now-dead path
+	//    until `git worktree prune` severs it entirely), and the move takes
+	//    every workspace nested under this one along with it, so their
+	//    worktrees — possibly in canonical repos this workspace does not
+	//    carry itself — need repairing too.
+	for canonical, paths := range s.movedWorktreesByCanonical(ctx, newPath) {
+		if err := s.Git.WorktreeRepair(ctx, canonical, paths...); err != nil {
 			warnings = append(warnings, AttachWarning{
-				Repo: r.Name, Branch: r.Branch, Reason: "worktree repair failed: " + err.Error(),
+				Reason: "worktree repair failed: " + err.Error(),
 			})
-			continue
 		}
-		repaired[canonical] = struct{}{}
 	}
 
 	// 4. Edit CLAUDE.md to insert the ticket reference. Preserve user content.
@@ -151,6 +142,46 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 		Warnings:        warnings,
 		SessionWarnings: sessionWarnings,
 	}, nil
+}
+
+// movedWorktreesByCanonical maps canonical repo path → the worktree paths
+// found under root, which is a workspace directory that has just been moved.
+// The walk mirrors hydrateContents' classification: a git worktree is a repo
+// (recorded, not descended into), a marker directory is a child workspace
+// (descended into), anything else is ignored. Descending matters because the
+// move took every nested workspace along, and a child may hold worktrees of
+// canonical repos the top workspace does not carry itself.
+func (s *Service) movedWorktreesByCanonical(ctx context.Context, root string) map[string][]string {
+	out := map[string][]string{}
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if s.Git.IsWorktree(ctx, dir) {
+			if canonical := s.Git.CanonicalRepoPath(ctx, dir); canonical != "" && canonical != dir {
+				out[canonical] = append(out[canonical], dir)
+			}
+			return
+		}
+		if depth >= maxDepth {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !isCandidateSubdir(e) {
+				continue
+			}
+			sub := filepath.Join(dir, e.Name())
+			// Only repos and child workspaces are walked; a stray plain
+			// directory is not arat's to look inside.
+			if s.Git.IsWorktree(ctx, sub) || hasMeta(sub) {
+				walk(sub, depth+1)
+			}
+		}
+	}
+	walk(root, 0)
+	return out
 }
 
 // updateClaudeMDForAttach replaces the file's header section (everything

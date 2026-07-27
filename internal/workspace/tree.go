@@ -20,8 +20,18 @@ type ErrAmbiguous struct {
 }
 
 func (e *ErrAmbiguous) Error() string {
-	return fmt.Sprintf("ambiguous workspace %q, matches %d: %s\nuse the full ref to disambiguate",
+	msg := fmt.Sprintf("ambiguous workspace %q, matches %d: %s\nuse the full ref to disambiguate",
 		e.Query, len(e.Matches), strings.Join(e.Matches, ", "))
+	// A top-level workspace's full ref is the ambiguous name itself, so
+	// "use the full ref" alone would send the user in a circle. The
+	// anchored ./ form pins it.
+	for _, m := range e.Matches {
+		if !strings.Contains(m, "/") {
+			msg += fmt.Sprintf(" (./%s for the top-level one)", m)
+			break
+		}
+	}
+	return msg
 }
 
 // JoinRef composes a child ref from a parent ref and a directory name. A
@@ -73,8 +83,20 @@ func Flatten(items []Workspace) []Workspace {
 // name is not unique, Resolve returns ErrAmbiguous listing the full refs
 // rather than guessing.
 //
+// A top-level workspace's ref IS its bare name, so a slash-free query cannot
+// say which of the two it means. It therefore always takes the bare-name
+// route and participates in the ambiguity scan: silently preferring the
+// top-level workspace would shadow same-named nested ones, and `arat rm`
+// would delete whichever won. Slash-containing queries are unambiguous (a
+// name never contains a slash) and match exactly.
+//
+// The anchored form "./<ref>" matches the ref exactly and skips the
+// bare-name route. It exists for the shadowed top-level workspace, whose ref
+// no other query can reach.
+//
 // Returns ErrNotFound when nothing matches.
 func Resolve(items []Workspace, query string) (*Workspace, error) {
+	anchored := strings.HasPrefix(strings.TrimSpace(query), "./")
 	query = strings.Trim(path.Clean(query), "/")
 	if query == "" || query == "." {
 		return nil, fmt.Errorf("%w: empty workspace name", ErrNotFound)
@@ -82,12 +104,36 @@ func Resolve(items []Workspace, query string) (*Workspace, error) {
 
 	all := Flatten(items)
 
-	// Exact ref wins outright, so an unambiguous full path is never
-	// reported as ambiguous against a same-named workspace elsewhere.
-	for i := range all {
-		if all[i].Ref == query {
-			return &all[i], nil
+	if anchored {
+		for i := range all {
+			if all[i].Ref == query {
+				return &all[i], nil
+			}
 		}
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, query)
+	}
+
+	if strings.Contains(query, "/") {
+		for i := range all {
+			if all[i].Ref == query {
+				return &all[i], nil
+			}
+		}
+		// A failed full ref is often a right leaf under a misremembered
+		// chain ("q3/abc-18--fonts" for "q3/abc-12--pdf/abc-18--fonts").
+		// If the last segment names real workspaces, say where they are.
+		last := query[strings.LastIndex(query, "/")+1:]
+		var hints []string
+		for i := range all {
+			if all[i].Name == last {
+				hints = append(hints, all[i].Ref)
+			}
+		}
+		if len(hints) > 0 {
+			sort.Strings(hints)
+			return nil, fmt.Errorf("%w: %s — did you mean %s?", ErrNotFound, query, strings.Join(hints, " or "))
+		}
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, query)
 	}
 
 	var matches []int

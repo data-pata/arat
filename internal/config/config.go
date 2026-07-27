@@ -157,7 +157,9 @@ root = "~/git/<your-org>"
 # Conventionally the user's initials. Required.
 branch_prefix = "<your-initials>"
 
-# Regex; first positional arg matching this is treated as a ticket id (lowercased).
+# Regex a ticket id must match (lowercased before matching). Used to validate
+# --ticket on "arat new" / "arat ticket attach" and to recognise the ticket in
+# existing workspace directory names.
 # ticket_pattern = "^[a-z]+-[0-9]+$"
 
 # Ticket URL template. {TICKET} -> "abc-123"; {TICKET_UPPER} -> "ABC-123".

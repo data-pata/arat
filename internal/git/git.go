@@ -37,8 +37,8 @@ func execRunner(ctx context.Context, dir, name string, args ...string) ([]byte, 
 type Inspection struct {
 	Branch   string // empty if detached HEAD
 	Dirty    bool   // working tree has uncommitted changes
-	Unpushed bool   // commits ahead of upstream (or no upstream and HEAD is non-empty)
-	Stashes  int    // number of stash entries
+	Unpushed bool   // commits not on the upstream (or, lacking one, on no remote branch at all)
+	Stashes  int    // stash entries made on this worktree's branch
 }
 
 // Inspect runs the cheap status checks needed for `arat ls`.
@@ -65,21 +65,52 @@ func (g *Git) Inspect(ctx context.Context, dir string) (Inspection, error) {
 		ins.Dirty = len(bytes.TrimSpace(out)) > 0
 	}
 
-	// Unpushed: prefer @{upstream}..HEAD; if no upstream is set, fall back to
-	// "any commits at all" being effectively unpushed (rare for fresh worktrees,
-	// noisy otherwise — so we only flag if upstream check explicitly says yes).
+	// Unpushed: prefer @{upstream}..HEAD. Without an upstream — the normal
+	// state for a branch created off a local base, e.g. `arat new
+	// --from-parent` — fall back to "commits on no remote branch at all".
+	// Skipping the fallback would hide exactly the commits that exist
+	// nowhere but this clone, which is what the unpushed signal (and the
+	// `arat rm` guard built on it) is for. A repo with no remotes is exempt:
+	// there is nowhere to push to, so flagging every commit forever would
+	// only train the user to reach for --force.
 	if out, _, err := g.run(ctx, dir, "git", "log", "@{upstream}..HEAD", "--oneline"); err == nil {
 		ins.Unpushed = len(bytes.TrimSpace(out)) > 0
-	}
-
-	if out, _, err := g.run(ctx, dir, "git", "stash", "list"); err == nil {
-		s := strings.TrimSpace(string(out))
-		if s != "" {
-			ins.Stashes = strings.Count(s, "\n") + 1
+	} else if remotes, _, err := g.run(ctx, dir, "git", "remote"); err == nil && len(bytes.TrimSpace(remotes)) > 0 {
+		if out, _, err := g.run(ctx, dir, "git", "rev-list", "--count", "HEAD", "--not", "--remotes"); err == nil {
+			ins.Unpushed = strings.TrimSpace(string(out)) != "0"
 		}
 	}
 
+	// Stashes: refs/stash lives on the canonical clone, shared by every
+	// worktree, so a raw count would light up every workspace of the repo
+	// for one stash made in any of them. Attribute by branch instead: both
+	// auto messages ("WIP on <branch>: …") and -m messages ("On <branch>:
+	// …") name the branch the stash was made on.
+	if out, _, err := g.run(ctx, dir, "git", "stash", "list"); err == nil {
+		ins.Stashes = countStashesOnBranch(string(out), ins.Branch)
+	}
+
 	return ins, nil
+}
+
+// countStashesOnBranch counts stash-list lines recorded on the given branch.
+// With no branch to attribute to (detached HEAD), every stash counts.
+func countStashesOnBranch(stashList, branch string) int {
+	lines := strings.Split(strings.TrimSpace(stashList), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return 0
+	}
+	if branch == "" {
+		return len(lines)
+	}
+	needle := " on " + strings.ToLower(branch) + ":"
+	n := 0
+	for _, ln := range lines {
+		if strings.Contains(strings.ToLower(ln), needle) {
+			n++
+		}
+	}
+	return n
 }
 
 // IsWorktree returns true if dir is the root of a git worktree (i.e. dir
@@ -175,14 +206,27 @@ func (g *Git) BranchRename(ctx context.Context, repoDir, from, to string) error 
 	return nil
 }
 
-// WorktreeRepair runs `git worktree repair` in repoDir to fix .git pointers
-// after a worktree directory has been moved on disk.
-func (g *Git) WorktreeRepair(ctx context.Context, repoDir string) error {
-	_, errOut, err := g.run(ctx, repoDir, "git", "worktree", "repair")
+// WorktreeRepair runs `git worktree repair [<path>...]` in repoDir to fix
+// worktree registrations after worktree directories have been moved on disk.
+//
+// The moved worktrees' new paths must be passed: per git's semantics, repair
+// run from the main worktree without arguments only fixes the linked-to-main
+// direction (worktrees whose .git file points at a moved main repo). To fix
+// the main-to-linked direction — the one a workspace rename breaks — git has
+// to be told where the worktrees are now.
+func (g *Git) WorktreeRepair(ctx context.Context, repoDir string, worktreePaths ...string) error {
+	args := append([]string{"worktree", "repair"}, worktreePaths...)
+	_, errOut, err := g.run(ctx, repoDir, "git", args...)
 	if err != nil {
 		return fmt.Errorf("git worktree repair (in %s): %w: %s", repoDir, err, strings.TrimSpace(string(errOut)))
 	}
 	return nil
+}
+
+// BranchExists reports whether refs/heads/<branch> exists in repoDir.
+func (g *Git) BranchExists(ctx context.Context, repoDir, branch string) bool {
+	_, _, err := g.run(ctx, repoDir, "git", "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+	return err == nil
 }
 
 // BranchDelete runs `git branch -d|-D <branch>` in repoDir.

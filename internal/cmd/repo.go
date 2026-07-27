@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/spf13/cobra"
@@ -78,21 +79,18 @@ CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 				Recursive: recursive,
 			})
 			if err != nil {
+				// A fan-out can fail halfway; the outcomes that did land
+				// are real and must be reported before the error, or the
+				// user is left unaware half the tree changed.
+				if res != nil {
+					writeAddReposText(s.deps.Stderr, io.Discard, res)
+				}
 				return mapAddReposError(err)
 			}
 
-			for _, o := range res.Outcomes {
-				if len(o.Added) > 0 {
-					fmt.Fprintf(s.deps.Stderr, "added %d repo(s) to %s\n", len(o.Added), o.Ref)
-					for _, r := range o.Added {
-						fmt.Fprintf(s.deps.Stderr, "  %s → %s\n", r.Name, r.Branch)
-						fmt.Fprintf(s.deps.Stdout, "%s\n", r.Path)
-					}
-				}
-				for _, reason := range o.Skipped {
-					fmt.Fprintf(s.deps.Stderr, "skipped %s: %s\n", o.Ref, reason)
-				}
-			}
+			s.writer().JSONRecord(res, func(out io.Writer) {
+				writeAddReposText(s.deps.Stderr, out, res)
+			})
 			return nil
 		},
 	}
@@ -102,11 +100,31 @@ CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 	return c
 }
 
+// writeAddReposText renders per-workspace outcomes: added-worktree paths on
+// stdout (one per line, for scripting), everything narrative on stderr.
+func writeAddReposText(stderr, stdout io.Writer, res *workspace.AddReposResult) {
+	for _, o := range res.Outcomes {
+		if len(o.Added) > 0 {
+			fmt.Fprintf(stderr, "added %d %s to %s\n", len(o.Added), pluralize(len(o.Added), "repo", "repos"), o.Ref)
+			for _, r := range o.Added {
+				fmt.Fprintf(stderr, "  %s → %s\n", r.Name, r.Branch)
+				fmt.Fprintf(stdout, "%s\n", r.Path)
+			}
+		}
+		for _, reason := range o.Skipped {
+			fmt.Fprintf(stderr, "skipped %s: %s\n", o.Ref, reason)
+		}
+	}
+}
+
 func mapAddReposError(err error) error {
 	var pre *workspace.ErrPrecondition
+	var ambiguous *workspace.ErrAmbiguous
 	switch {
 	case errors.Is(err, workspace.ErrNotFound):
 		return &exitErr{code: ExitNotFound, err: err}
+	case errors.As(err, &ambiguous):
+		return &exitErr{code: ExitUsage, err: err}
 	case errors.Is(err, workspace.ErrAlreadyExists):
 		return &exitErr{code: ExitConflict, err: err}
 	case errors.As(err, &pre):

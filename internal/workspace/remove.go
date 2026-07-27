@@ -45,10 +45,16 @@ type RemoveOptions struct {
 
 // RemoveResult is the outcome of Service.Remove.
 type RemoveResult struct {
-	// StashedRepos lists worktrees that had stash entries at the time of
-	// removal. The stash refs themselves live on the canonical clone's
-	// .git/refs/stash and survive the worktree removal — callers can surface
-	// a hint pointing the user there so the stashes don't get forgotten.
+	// Removed lists the refs of every workspace deleted: the target first,
+	// then its descendants. Recursive removal is the one place the tool
+	// destroys things the user did not name, so the caller can show exactly
+	// what went.
+	Removed []string
+	// StashedRepos lists canonical repos whose stash entries were touched by
+	// the removal, one entry per canonical repo. The stash refs themselves
+	// live on the canonical clone's .git/refs/stash and survive the worktree
+	// removal — callers can surface a hint pointing the user there so the
+	// stashes don't get forgotten.
 	StashedRepos []StashedRepo
 }
 
@@ -87,14 +93,25 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 	// Collect the worktrees of the workspace itself and of every workspace
 	// below it. Each workspace dir is scanned on its own: a child workspace
 	// directory is not a worktree, so scanning one picks up only its own
-	// worktrees and never double-counts a child's.
+	// worktrees and never double-counts a child's. The path-dedupe below is
+	// defence in depth for inputs that break that assumption anyway (e.g. a
+	// repo whose committed tree carries a marker file) — removing the same
+	// worktree twice would fail halfway through the teardown.
 	var worktrees []worktree
-	for _, target := range append([]Workspace{*ws}, nested...) {
+	seen := map[string]struct{}{}
+	targets := append([]Workspace{*ws}, nested...)
+	for _, target := range targets {
 		found, err := s.locateWorktrees(ctx, target.Path)
 		if err != nil {
 			return nil, err
 		}
-		worktrees = append(worktrees, found...)
+		for _, wt := range found {
+			if _, dup := seen[wt.path]; dup {
+				continue
+			}
+			seen[wt.path] = struct{}{}
+			worktrees = append(worktrees, wt)
+		}
 	}
 
 	if !opts.Force {
@@ -104,17 +121,29 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 	}
 
 	res := &RemoveResult{}
+	for _, target := range targets {
+		res.Removed = append(res.Removed, target.Ref)
+	}
+	// One stash note per canonical repo: the stash refs live there, so
+	// repeating the note for every removed worktree of the same repo would
+	// just re-announce the same refs.
+	stashedIdx := map[string]int{}
 	for _, wt := range worktrees {
 		canonical := s.Git.CanonicalRepoPath(ctx, wt.path)
 		if canonical == "" {
 			return nil, fmt.Errorf("could not resolve canonical repo for %s", wt.path)
 		}
 		if wt.ins != nil && wt.ins.Stashes > 0 {
-			res.StashedRepos = append(res.StashedRepos, StashedRepo{
-				Path:          wt.path,
-				CanonicalRepo: canonical,
-				Stashes:       wt.ins.Stashes,
-			})
+			if i, dup := stashedIdx[canonical]; dup {
+				res.StashedRepos[i].Stashes += wt.ins.Stashes
+			} else {
+				stashedIdx[canonical] = len(res.StashedRepos)
+				res.StashedRepos = append(res.StashedRepos, StashedRepo{
+					Path:          wt.path,
+					CanonicalRepo: canonical,
+					Stashes:       wt.ins.Stashes,
+				})
+			}
 		}
 		if err := s.Git.WorktreeRemove(ctx, canonical, wt.path, opts.Force); err != nil {
 			return nil, err

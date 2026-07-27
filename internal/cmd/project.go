@@ -62,18 +62,21 @@ The resolved name and URL are cached in the workspace's marker file so
 			if err != nil {
 				return &exitErr{code: ExitUsage, err: err}
 			}
-			// No flag and no way to ask: fail as a usage error before any
-			// config or Linear access, so scripts get a stable exit 2.
-			if kind == "" && (!isInteractive(s.deps) || s.deps.PickContainer == nil) {
-				return &exitErr{code: ExitUsage, err: errors.New("one of --project or --initiative is required (or run in a terminal to pick interactively)")}
-			}
 
 			cfg, err := s.loadConfig()
 			if err != nil {
 				return err
 			}
+			// Disabled Linear blocks every form of this command, so report
+			// it before complaining about missing flags — "add --project"
+			// would be advice that cannot work.
 			if !cfg.Linear.Enabled {
 				return &exitErr{code: ExitUsage, err: errors.New("linear is disabled in config (set [linear] enabled = true)")}
+			}
+			// No flag and no way to ask: fail as a usage error before any
+			// Linear access, so scripts get a stable exit 2.
+			if kind == "" && (!isInteractive(s.deps) || s.deps.PickContainer == nil) {
+				return &exitErr{code: ExitUsage, err: errors.New("one of --project or --initiative is required (or run in a terminal to pick interactively)")}
 			}
 
 			lc := s.deps.NewLinear()

@@ -149,11 +149,14 @@ type runResult struct {
 // run executes a cmd line with injected deps. cfg may be nil (a minimal one is
 // supplied); svc may be nil (an empty fakeService is supplied).
 func run(t *testing.T, args []string, cfg *config.Config, svc *fakeService) runResult {
-	return runWithPicker(t, args, cfg, svc, nil)
+	// No tty, no picker: the plain non-interactive invocation.
+	return runWithDeps(t, args, cfg, svc, depsOpts{})
 }
 
 func runWithPicker(t *testing.T, args []string, cfg *config.Config, svc *fakeService, picker func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error)) runResult {
-	return runWithDeps(t, args, cfg, svc, depsOpts{picker: picker})
+	// Picker mode presumes a terminal: without one the commands refuse with
+	// a usage error before the picker is consulted.
+	return runWithDeps(t, args, cfg, svc, depsOpts{picker: picker, isTTY: func() bool { return true }})
 }
 
 type depsOpts struct {
@@ -809,6 +812,7 @@ func TestRm_noStashedReposNoNote(t *testing.T) {
 func TestRm_pickerHappy(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Ref: "a", Path: "/a"}, {Name: "b", Ref: "b", Path: "/b"}}}
 	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		isTTY: func() bool { return true },
 		picker: func(_ context.Context, items []workspace.Workspace, _ io.Writer) (*workspace.Workspace, error) {
 			require.Len(t, items, 2)
 			return &workspace.Workspace{Name: "b", Ref: "b", Path: "/b"}, nil
@@ -827,6 +831,7 @@ func TestRm_pickerHappy(t *testing.T) {
 func TestRm_pickerConfirmDeclined(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}}}
 	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		isTTY: func() bool { return true },
 		picker: func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
 			return &workspace.Workspace{Name: "a", Path: "/a"}, nil
 		},
@@ -840,6 +845,7 @@ func TestRm_pickerConfirmDeclined(t *testing.T) {
 func TestRm_pickerCancelled(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}}}
 	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		isTTY: func() bool { return true },
 		picker: func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
 			return nil, nil // user cancelled
 		},
@@ -891,10 +897,18 @@ func TestGo_notFound(t *testing.T) {
 	assert.Equal(t, ExitNotFound, r.exit)
 }
 
-func TestGo_noNameNoPickerWired(t *testing.T) {
-	// run() doesn't wire PickWorkspace by default, so the picker should
-	// refuse cleanly rather than panic.
+func TestGo_noNameOutsideTerminal(t *testing.T) {
+	// Without a tty there is no one to pick, and cancel-equals-success
+	// would otherwise turn the missing argument into a silent exit 0
+	// (`cd "$(arat go)"` would cd to $HOME).
 	r := run(t, []string{"go"}, nil, nil)
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "a workspace ref is required outside a terminal")
+}
+
+func TestGo_noNameNoPickerWired(t *testing.T) {
+	// A tty but no wired picker should refuse cleanly rather than panic.
+	r := runWithDeps(t, []string{"go"}, nil, nil, depsOpts{isTTY: func() bool { return true }})
 	assert.Equal(t, ExitUsage, r.exit)
 	assert.Contains(t, r.stderr, "no PickWorkspace impl wired")
 }
@@ -1063,7 +1077,7 @@ func TestRepoAdd_explicitWorkspace(t *testing.T) {
 	assert.Equal(t, "abc-1--x", svc.addReposCalls[0].Workspace)
 	assert.Equal(t, []string{"repo-b"}, svc.addReposCalls[0].Repos)
 	assert.Contains(t, r.stdout, filepath.Join(wsDir, "abc-1--x", "repo-b"))
-	assert.Contains(t, r.stderr, "added 1 repo(s) to abc-1--x")
+	assert.Contains(t, r.stderr, "added 1 repo to abc-1--x")
 }
 
 func TestRepoAdd_inferFromCwd(t *testing.T) {
@@ -1402,7 +1416,7 @@ func TestMissingConfig(t *testing.T) {
 
 func TestUnknownCommand(t *testing.T) {
 	r := run(t, []string{"nope"}, nil, nil)
-	assert.Equal(t, ExitGeneric, r.exit, "uncategorized cobra errors fall through to ExitGeneric")
+	assert.Equal(t, ExitUsage, r.exit, "an unknown subcommand is a usage error like any other")
 }
 
 func TestRoot_helpExits0(t *testing.T) {

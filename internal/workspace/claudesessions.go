@@ -73,6 +73,16 @@ func (s *Service) MoveSessionsForRename(oldPath, newPath string) []SessionMoveWa
 			continue
 		}
 		if matchesAny(name, siblingPrefixes) {
+			// The dir also belongs to another workspace's encoded path.
+			// When it is the renamed workspace's own root dir, sessions
+			// started there are being left behind — say so, since the
+			// encoding is ambiguous and arat cannot split the dir.
+			if name == oldPrefix {
+				warnings = append(warnings, SessionMoveWarning{
+					Dir:    name,
+					Reason: "another workspace's path encodes to the same session dir (Claude's cwd encoding is ambiguous); left in place — move individual sessions with `arat new --carry-session <id>` if needed",
+				})
+			}
 			continue
 		}
 		newName := newPrefix + name[len(oldPrefix):]
@@ -157,42 +167,105 @@ func findSessionFile(root, fileName string) (string, error) {
 	return "", fmt.Errorf("%w: session %s", ErrNotFound, fileName)
 }
 
-// siblingEncodedPrefixes returns the encoded prefixes of every directory
-// alongside the one being renamed, except for the two endpoints of the rename.
-// Used to avoid mis-matching a sibling workspace whose name shares a prefix
-// with the one being renamed (e.g. `foo` vs `foo-extra`).
+// siblingEncodedPrefixes returns the encoded prefixes of directories whose
+// session dirs must NOT be swept up by the rename: everything in the tree
+// except the renamed workspace itself (its children move with it — they are
+// subdirectories, so the rename changed their cwd too).
 //
-// Siblings are read from the renamed workspace's own parent directory, not
-// from WorkspacesDir. A rename is always in place, so both endpoints share
-// that parent. Scoping to WorkspacesDir instead would, for a workspace nested
-// inside a project, list the *project* as a sibling — and since the project's
-// encoded path is a prefix of its children's, every session dir belonging to
-// the workspace being renamed would be mistaken for the project's and skipped.
-// For a top-level workspace the parent is WorkspacesDir, so this is the same
-// set as before.
+// Two sources feed the list.
+//
+// Same-parent siblings, read from the renamed workspace's own parent
+// directory (not WorkspacesDir: for a nested workspace that would list the
+// containing project, whose encoded path is a prefix of the children's, and
+// everything would be skipped). This guards the name-prefix overlap case,
+// `foo` vs `foo-extra`.
+//
+// The rest of the workspace tree, because Claude's cwd encoding collapses
+// both "/" and "." to "-", so a nested path and a hyphenated name collide:
+// <ws>/p/foo and <ws>/p-foo encode identically. A workspace anywhere in the
+// tree whose encoded path equals or extends the renamed one's would have its
+// session dirs hijacked by the move. arat cannot split a genuinely shared
+// encoded dir (the encoding is lossy), but it can refuse to take it.
 func (s *Service) siblingEncodedPrefixes(oldPath, newPath string) []string {
-	parent := filepath.Dir(oldPath)
-	if parent == "" || parent == "." {
-		return nil
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(p string) {
+		enc := EncodeCwdAsProjectDir(p)
+		if _, ok := seen[enc]; !ok {
+			seen[enc] = struct{}{}
+			out = append(out, enc)
+		}
 	}
-	entries, err := os.ReadDir(parent)
-	if err != nil {
-		return nil
-	}
+
 	oldName := filepath.Base(oldPath)
 	newName := filepath.Base(newPath)
-	var out []string
-	for _, e := range entries {
-		if !e.IsDir() {
+	if parent := filepath.Dir(oldPath); parent != "" && parent != "." {
+		if entries, err := os.ReadDir(parent); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if e.Name() == oldName || e.Name() == newName {
+					continue
+				}
+				add(filepath.Join(parent, e.Name()))
+			}
+		}
+	}
+
+	for _, dir := range s.workspaceDirs() {
+		// The endpoints and everything below them move — that is the point
+		// of the rename. Ancestors must be excluded too: an ancestor's
+		// encoded path is a prefix of the renamed workspace's, so listing
+		// it would classify every candidate as the ancestor's and skip the
+		// whole migration.
+		if dir == oldPath || dir == newPath ||
+			isUnderDir(dir, oldPath) || isUnderDir(dir, newPath) ||
+			isUnderDir(oldPath, dir) || isUnderDir(newPath, dir) {
 			continue
 		}
-		name := e.Name()
-		if name == oldName || name == newName {
-			continue
-		}
-		out = append(out, EncodeCwdAsProjectDir(filepath.Join(parent, name)))
+		add(dir)
 	}
 	return out
+}
+
+// workspaceDirs lists every workspace directory in the tree by walking the
+// marker files — no git calls. Used only for encoding-collision exclusion,
+// so best-effort: an unreadable directory contributes nothing.
+func (s *Service) workspaceDirs() []string {
+	if s.WorkspacesDir == "" {
+		return nil
+	}
+	var out []string
+	var walk func(dir string, depth int)
+	walk = func(dir string, depth int) {
+		if depth >= maxDepth {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || e.Name() == claudeWorkspaceDir {
+				continue
+			}
+			sub := filepath.Join(dir, e.Name())
+			// Top-level dirs are workspaces by definition (legacy layout);
+			// deeper ones only when they carry the marker.
+			if depth == 0 || hasMeta(sub) {
+				out = append(out, sub)
+				walk(sub, depth+1)
+			}
+		}
+	}
+	walk(s.WorkspacesDir, 0)
+	return out
+}
+
+// isUnderDir reports whether p is strictly inside dir.
+func isUnderDir(p, dir string) bool {
+	return strings.HasPrefix(p, dir+string(os.PathSeparator))
 }
 
 func matchesAny(name string, prefixes []string) bool {

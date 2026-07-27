@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,12 +143,21 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 		base = "origin/HEAD"
 	}
 
-	// Pre-flight: every canonical clone must exist before we spawn any work,
-	// so a missing repo fails fast and doesn't race against in-flight fetches.
+	// Pre-flight: every canonical clone must exist and none may already have
+	// the branch, before we spawn any work — so a bad repo set fails fast,
+	// doesn't race against in-flight fetches, and a branch collision (the
+	// same short name in another workspace with an overlapping repo set, or
+	// a branch kept by `rm --keep-branches`) surfaces as an arat-level
+	// conflict rather than a raw git fatal after some worktrees were made.
 	for _, repo := range repos {
-		if !dirExists(filepath.Join(s.Root, repo)) {
+		canonical := filepath.Join(s.Root, repo)
+		if !dirExists(canonical) {
 			cleanup()
-			return nil, fmt.Errorf("%w: canonical repo %s not found at %s", ErrNotFound, repo, filepath.Join(s.Root, repo))
+			return nil, fmt.Errorf("%w: canonical repo %s not found at %s", ErrNotFound, repo, canonical)
+		}
+		if s.Git.BranchExists(ctx, canonical, branch) {
+			cleanup()
+			return nil, fmt.Errorf("%w: branch %s already exists in %s — used by another workspace, or left behind by one removed with --keep-branches; pick a different name or delete the branch", ErrAlreadyExists, branch, repo)
 		}
 	}
 
@@ -214,15 +224,21 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 		Ticket:    opts.Ticket,
 		ShortName: opts.ShortName,
 		Created:   now,
+		Repos:     []RepoStatus{},
 	}
 	if opts.Ticket != "" && s.TicketURL != "" {
 		ws.TicketURL = renderTicketURL(s.TicketURL, opts.Ticket)
 	}
 	for _, repo := range repos {
+		repoBase := base
+		if alt, ok := baseByRepo[repo]; ok && alt != "" {
+			repoBase = alt
+		}
 		ws.Repos = append(ws.Repos, RepoStatus{
 			Name:   repo,
 			Path:   filepath.Join(full, repo),
 			Branch: branch,
+			Base:   repoBase,
 		})
 	}
 	return ws, nil
@@ -247,6 +263,21 @@ func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, r
 	if err != nil {
 		return "", "", nil, err
 	}
+	// A single-repo workspace's directory is itself a git worktree, so a
+	// child created inside it would live inside the repo: invisible to the
+	// tree walk (the worktree is classified as a repo and never recursed
+	// into), permanently dirtying the repo, and destroyed unseen by
+	// `arat rm --force` on the parent.
+	if s.Git.IsWorktree(ctx, parent.Path) {
+		return "", "", nil, fmt.Errorf("%w: %s is a single-repo workspace (its directory is a git worktree) and cannot contain other workspaces", ErrInvalidInput, parent.Ref)
+	}
+	// The read side stops descending at maxDepth, so a workspace created
+	// deeper would exist on disk but be invisible to ls, the picker, and —
+	// fatally — to the precondition checks of `arat rm --recursive`.
+	// Refuse at create time instead of building what we cannot see.
+	if strings.Count(parent.Ref, "/")+2 > maxDepth {
+		return "", "", nil, fmt.Errorf("%w: nesting deeper than %d levels is not supported (parent %s)", ErrInvalidInput, maxDepth, parent.Ref)
+	}
 	if !opts.InheritParentBranches {
 		return parent.Path, parent.Ref, opts.BaseByRepo, nil
 	}
@@ -259,6 +290,12 @@ func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, r
 		if r.Branch != "" {
 			merged[r.Name] = r.Branch
 		}
+	}
+	// The user explicitly asked to stack on the parent; if the parent has
+	// no branch to offer at all, falling back to the default base silently
+	// would do the opposite of what was asked.
+	if len(merged) == 0 {
+		return "", "", nil, fmt.Errorf("%w: %s has no worktrees to inherit branches from — drop --from-parent or give the parent repos first", ErrInvalidInput, parent.Ref)
 	}
 	maps.Copy(merged, opts.BaseByRepo)
 	return parent.Path, parent.Ref, merged, nil

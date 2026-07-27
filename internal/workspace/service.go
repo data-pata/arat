@@ -26,7 +26,12 @@ type Git interface {
 	WorktreeRemove(ctx context.Context, repoDir, target string, force bool) error
 	BranchDelete(ctx context.Context, repoDir, branch string, force bool) error
 	BranchRename(ctx context.Context, repoDir, from, to string) error
-	WorktreeRepair(ctx context.Context, repoDir string) error
+	BranchExists(ctx context.Context, repoDir, branch string) bool
+	// WorktreeRepair fixes worktree registrations after a move. The moved
+	// worktrees' new paths must be passed explicitly: without them git can
+	// only repair the linked-to-main direction, leaving the canonical repo
+	// pointing at the old path.
+	WorktreeRepair(ctx context.Context, repoDir string, worktreePaths ...string) error
 }
 
 // Service is the workspace-domain entry point used by command handlers.
@@ -152,30 +157,40 @@ func (s *Service) list(ctx context.Context, inspect bool) ([]Workspace, error) {
 }
 
 // Get returns one workspace, fully hydrated, addressed either by its full ref
-// ("q3-billing/abc-12--invoice") or by a bare directory name that is unique
-// across the tree ("abc-12--invoice").
+// ("q3-billing/abc-12--invoice"), by a bare directory name that is unique
+// across the tree ("abc-12--invoice"), or by the anchored "./<ref>" form that
+// matches the ref exactly.
 //
 // Returns ErrNotFound if nothing matches, or *ErrAmbiguous if a bare name
 // matches more than one workspace.
 func (s *Service) Get(ctx context.Context, ref string) (*Workspace, error) {
-	// Fast path: the ref addresses a directory directly. Covers both
-	// top-level names and full refs without walking the tree.
-	if full, err := s.resolveRefPath(ref); err == nil {
-		if info, statErr := os.Stat(full); statErr == nil {
-			if !info.IsDir() {
-				return nil, fmt.Errorf("%w: %s is not a directory", ErrNotFound, ref)
+	// Fast path: a multi-segment ref whose directory carries the workspace
+	// marker. The marker check is what keeps Get from hydrating arbitrary
+	// directories that merely exist under workspaces_dir — a repo worktree
+	// ("p/repo-a") or any folder inside one ("foo/repo-a/src") would
+	// otherwise read as a workspace, and `arat rm` would happily delete it.
+	// The worktree check guards the one way a marker appears without arat
+	// writing it: committed at the root of the repo itself.
+	//
+	// Single-segment refs skip the fast path even though the directory could
+	// be statted directly: a bare name must go through Resolve's ambiguity
+	// scan so a top-level workspace cannot silently shadow a same-named
+	// nested one.
+	if clean := cleanRef(ref); strings.Contains(clean, "/") {
+		if full, err := s.resolveRefPath(ref); err == nil {
+			if info, statErr := os.Stat(full); statErr == nil && info.IsDir() &&
+				hasMeta(full) && !s.Git.IsWorktree(ctx, full) {
+				ws, err := s.hydrateDir(ctx, ParentRef(clean), filepath.Base(full), full, info.ModTime(), true, strings.Count(clean, "/"))
+				if err != nil {
+					return nil, err
+				}
+				return &ws, nil
 			}
-			clean := cleanRef(ref)
-			ws, err := s.hydrateDir(ctx, ParentRef(clean), filepath.Base(full), full, info.ModTime(), true, strings.Count(clean, "/"))
-			if err != nil {
-				return nil, err
-			}
-			return &ws, nil
 		}
 	}
 
-	// Slow path: a bare name that lives somewhere below a project. Walk the
-	// tree without git inspection, then fully hydrate whatever matched.
+	// Slow path: walk the tree without git inspection, then fully hydrate
+	// whatever matched.
 	items, err := s.list(ctx, false)
 	if err != nil {
 		if errors.Is(err, ErrNoWorkspacesDir) {
@@ -249,14 +264,13 @@ func (e *ErrPrecondition) Error() string {
 //
 // Classification of a directory's subdirectories, in order:
 //
-//  1. carries the marker file (MetaFile) -> a child workspace, recursed into
-//  2. is a git worktree                  -> one of this workspace's repos
+//  1. is a git worktree                  -> one of this workspace's repos
+//  2. carries the marker file (MetaFile) -> a child workspace, recursed into
 //  3. neither                            -> ignored
 //
-// The marker is checked first because it is the only signal that survives
-// both cases arat has to tell apart: a project's own worktree and a nested
-// workspace are both plain subdirectories, and the nested one is the only one
-// arat itself created a marker for.
+// The worktree check runs first because a child workspace directory is never
+// itself a worktree, whereas a repo's committed tree can legitimately contain
+// a .arat.toml at its root — the marker alone cannot tell those apart.
 //
 // When inspect is false, no git commands run at all: repos are left empty and
 // only the marker file drives recursion.
@@ -273,6 +287,10 @@ func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, 
 		Path:    full,
 		Kind:    KindTask,
 		Created: created,
+		// Initialised so a workspace with no worktrees (a project, or a
+		// shallow listing) marshals as "repos": [] rather than null —
+		// JSON consumers index into it unconditionally.
+		Repos: []RepoStatus{},
 	}
 	if meta != nil {
 		ws.Kind = meta.Kind
@@ -318,6 +336,19 @@ func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bo
 		}
 		subPath := filepath.Join(ws.Path, sub.Name())
 
+		// A worktree outranks the marker: a child workspace directory is
+		// never itself a worktree (arat always creates the multi-repo
+		// layout for children), so a subdir that git recognises is a repo —
+		// even when the repo's own committed tree happens to contain a
+		// .arat.toml at its root. Classifying that repo as a child
+		// workspace would make Remove double-count its worktree. The
+		// inspect=false walk cannot afford git calls, so there the marker
+		// alone decides; the destructive paths all run with inspect=true.
+		if inspect && s.Git.IsWorktree(ctx, subPath) {
+			ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), subPath))
+			continue
+		}
+
 		if hasMeta(subPath) {
 			// Past the depth cap, stop descending but keep walking this
 			// level so the workspace's own repos are still found.
@@ -334,10 +365,6 @@ func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bo
 			}
 			ws.Children = append(ws.Children, child)
 			continue
-		}
-
-		if inspect && s.Git.IsWorktree(ctx, subPath) {
-			ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), subPath))
 		}
 	}
 	sort.Slice(ws.Children, func(i, j int) bool { return ws.Children[i].Name < ws.Children[j].Name })

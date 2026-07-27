@@ -384,6 +384,7 @@ func TestRm_pickerPromptNamesNestedCount(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{project}}
 	var prompt string
 	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
+		isTTY: func() bool { return true },
 		picker: func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
 			return &project, nil
 		},

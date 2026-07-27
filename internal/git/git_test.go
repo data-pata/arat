@@ -175,3 +175,75 @@ func TestRunner_fakeable(t *testing.T) {
 	assert.True(t, ins.Unpushed)
 	assert.Greater(t, calls, 3)
 }
+
+// A branch created off a local base gets no upstream (the --from-parent
+// shape). Its commits exist in no remote, so they must read as unpushed —
+// this is what stands between `arat rm` and silently discarding them.
+func TestInspect_noUpstreamCommitsAreUnpushed(t *testing.T) {
+	origin := t.TempDir()
+	mustGit(t, origin, "init", "--bare")
+	seed := initRepo(t)
+	mustGit(t, seed, "remote", "add", "origin", origin)
+	mustGit(t, seed, "push", "-u", "origin", "main")
+
+	// New branch off local main, no upstream, one local-only commit.
+	mustGit(t, seed, "checkout", "-b", "stacked")
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "local.txt"), []byte("x"), 0o644))
+	mustGit(t, seed, "add", ".")
+	mustGit(t, seed, "commit", "-m", "local only")
+
+	g := New()
+	ins, err := g.Inspect(t.Context(), seed)
+	require.NoError(t, err)
+	assert.True(t, ins.Unpushed, "commits on no remote branch are unpushed")
+
+	// Once the commit reaches any remote branch, the flag clears even
+	// though the branch still has no upstream.
+	mustGit(t, seed, "push", "origin", "stacked:stacked")
+	ins, err = g.Inspect(t.Context(), seed)
+	require.NoError(t, err)
+	assert.False(t, ins.Unpushed)
+}
+
+// A repo with no remotes has nowhere to push to; flagging every commit
+// forever would only train the user to reach for --force.
+func TestInspect_noRemotesMeansNotUnpushed(t *testing.T) {
+	dir := initRepo(t)
+	g := New()
+	ins, err := g.Inspect(t.Context(), dir)
+	require.NoError(t, err)
+	assert.False(t, ins.Unpushed)
+}
+
+// refs/stash is shared by every worktree of a clone, so the count must be
+// attributed by branch or one stash lights up every workspace of the repo.
+func TestCountStashesOnBranch(t *testing.T) {
+	list := "stash@{0}: WIP on feat-a: 1234abc msg\n" +
+		"stash@{1}: On feat-b: named stash\n" +
+		"stash@{2}: WIP on feat-a: 5678def more"
+	assert.Equal(t, 2, countStashesOnBranch(list, "feat-a"))
+	assert.Equal(t, 1, countStashesOnBranch(list, "feat-b"))
+	assert.Equal(t, 0, countStashesOnBranch(list, "other"))
+	assert.Equal(t, 3, countStashesOnBranch(list, ""), "detached HEAD cannot attribute; count all")
+	assert.Equal(t, 0, countStashesOnBranch("", "feat-a"))
+}
+
+// Stashes made in one worktree must not show up on another worktree's count.
+func TestInspect_stashesAttributedToBranch(t *testing.T) {
+	dir := initRepo(t)
+	other := filepath.Join(t.TempDir(), "wt")
+	mustGit(t, dir, "worktree", "add", "-b", "other-branch", other, "HEAD")
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("x"), 0o644))
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "stash", "push", "-m", "parked")
+
+	g := New()
+	main, err := g.Inspect(t.Context(), dir)
+	require.NoError(t, err)
+	assert.Equal(t, 1, main.Stashes)
+
+	wt, err := g.Inspect(t.Context(), other)
+	require.NoError(t, err)
+	assert.Equal(t, 0, wt.Stashes, "the stash was made on main, not on other-branch")
+}

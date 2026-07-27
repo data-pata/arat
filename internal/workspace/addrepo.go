@@ -92,15 +92,19 @@ func (s *Service) AddRepos(ctx context.Context, opts AddReposOptions) (*AddRepos
 	res := &AddReposResult{}
 	for _, target := range targets {
 		outcome, err := s.addReposToOne(ctx, target, opts.Repos, base, opts.Recursive)
-		if err != nil {
-			return nil, err
-		}
 		res.Outcomes = append(res.Outcomes, outcome)
+		if err != nil {
+			// Return what already happened along with the error: in a
+			// fan-out, workspaces before this one really did get the repo,
+			// and hiding that would leave the user unaware half the tree
+			// changed. Re-running after the fix is safe (lenient skips).
+			return res, err
+		}
 	}
 
 	updated, err := s.Get(ctx, ws.Ref)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	res.Workspace = updated
 	return res, nil
@@ -128,27 +132,39 @@ func (s *Service) addReposToOne(ctx context.Context, ws Workspace, repos []strin
 	for _, r := range ws.Repos {
 		existing[r.Name] = struct{}{}
 	}
+	branch := deriveBranch(&ws, s.BranchPrefix)
+
 	var toAdd []string
 	for _, repo := range repos {
-		present := false
+		target := filepath.Join(ws.Path, repo)
+		// Say what actually occupies the name: a repo the workspace carries
+		// reads differently from a child workspace or stray directory that
+		// happens to share it, and only the first is "already present".
+		blocked := ""
 		if _, ok := existing[repo]; ok {
-			present = true
-		} else if _, err := os.Stat(filepath.Join(ws.Path, repo)); err == nil {
-			present = true
+			blocked = repo + ": already present"
+		} else if _, err := os.Stat(target); err == nil {
+			if hasMeta(target) {
+				blocked = repo + ": blocked by the child workspace of the same name"
+			} else {
+				blocked = repo + ": a directory with that name already exists"
+			}
 		} else if !errors.Is(err, os.ErrNotExist) {
-			return outcome, fmt.Errorf("stat %s: %w", filepath.Join(ws.Path, repo), err)
+			return outcome, fmt.Errorf("stat %s: %w", target, err)
+		} else if s.Git.BranchExists(ctx, filepath.Join(s.Root, repo), branch) {
+			// Surface the collision as an arat-level message rather than
+			// letting `git worktree add` fail with a raw fatal mid-run.
+			blocked = fmt.Sprintf("%s: branch %s already exists there — another workspace's, or kept by rm --keep-branches", repo, branch)
 		}
-		if present {
+		if blocked != "" {
 			if lenient {
-				outcome.Skipped = append(outcome.Skipped, repo+": already present")
+				outcome.Skipped = append(outcome.Skipped, blocked)
 				continue
 			}
-			return outcome, fmt.Errorf("%w: %s already in workspace %s", ErrAlreadyExists, repo, ws.Ref)
+			return outcome, fmt.Errorf("%w: %s (workspace %s)", ErrAlreadyExists, blocked, ws.Ref)
 		}
 		toAdd = append(toAdd, repo)
 	}
-
-	branch := deriveBranch(&ws, s.BranchPrefix)
 	for _, repo := range toAdd {
 		canonical := filepath.Join(s.Root, repo)
 		fetchErr := s.Git.Fetch(ctx, canonical)

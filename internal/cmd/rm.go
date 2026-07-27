@@ -3,6 +3,8 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
+	"os"
 
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/spf13/cobra"
@@ -99,11 +101,22 @@ when a project still has nested workspaces and --recursive was not given.
 
 			fmt.Fprintf(s.deps.Stderr, "removed workspace %s\n", name)
 			if res != nil {
+				// A recursive removal destroys workspaces the user did not
+				// name; list them so what went is on record.
+				for _, ref := range res.Removed {
+					if ref != name {
+						fmt.Fprintf(s.deps.Stderr, "  removed nested workspace %s\n", ref)
+					}
+				}
 				for _, sr := range res.StashedRepos {
 					fmt.Fprintf(s.deps.Stderr,
 						"  note: %d stash %s preserved in %s (git -C %s stash list)\n",
 						sr.Stashes, pluralize(sr.Stashes, "entry", "entries"), sr.CanonicalRepo, sr.CanonicalRepo)
 				}
+			}
+			warnIfCwdRemoved(s)
+			if *s.jsonOut && res != nil {
+				s.writer().JSONRecord(res, func(io.Writer) {})
 			}
 			return nil
 		},
@@ -112,6 +125,24 @@ when a project still has nested workspaces and --recursive was not given.
 	c.Flags().BoolVar(&keepBranches, "keep-branches", false, "do not delete the branches when removing worktrees")
 	c.Flags().BoolVar(&recursive, "recursive", false, "also remove the workspaces nested inside this one")
 	return c
+}
+
+// warnIfCwdRemoved notes when the shell's working directory no longer exists
+// after the removal — running `arat rm` from inside the workspace being
+// removed is common, and the resulting getcwd failures are cryptic without a
+// pointer to the cause.
+func warnIfCwdRemoved(s *state) {
+	if s.deps.Cwd == nil {
+		return
+	}
+	cwd, err := s.deps.Cwd()
+	if err != nil {
+		fmt.Fprintln(s.deps.Stderr, "note: your current directory was inside the removed workspace — cd out of it")
+		return
+	}
+	if _, err := os.Stat(cwd); err != nil {
+		fmt.Fprintln(s.deps.Stderr, "note: your current directory was removed — cd out of it")
+	}
 }
 
 // rmPrompt is the picker-mode confirmation. When the workspace holds others

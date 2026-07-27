@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/data-pata/arat/internal/config"
 	"github.com/data-pata/arat/internal/linear"
@@ -129,10 +130,13 @@ project or inside an issue.
 
 Commands that address a single workspace take a ref — the slash-joined path
 from workspaces_dir, e.g. "q3-billing/abc-12--invoice" — or a bare name that
-is unique across the tree.
+is unique across the tree. An ambiguous bare name is an error listing the
+candidates; "./<ref>" matches a ref exactly, which is how a top-level
+workspace is addressed when a nested one shares its name.
 
-Commands accept --json where structured output is useful (ls, new, ticket create).
-Stderr is for operational messages; stdout is for results / JSON.
+Commands accept --json where structured output is useful (ls, new, go, rm,
+repo add, ticket create, project link|unlink). Stderr is for operational
+messages; stdout is for results / JSON.
 
 Exit codes:
   0  ok
@@ -150,7 +154,10 @@ Exit codes:
 
 	root.PersistentFlags().StringVar(&configPath, "config", "", "path to config file (default: $ARAT_CONFIG, $XDG_CONFIG_HOME/arat/config.toml, $HOME/.config/arat/config.toml)")
 	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "emit JSON output where supported")
-	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "emit per-step progress to stderr (e.g. one line per repo during `arat new`)")
+	// No backticks in the usage string: pflag renders backticked text as the
+	// flag's value placeholder, which would make a boolean flag read as if
+	// it took an argument.
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "emit per-step progress to stderr (one line per repo during new)")
 
 	state := &state{
 		deps:       d,
@@ -172,7 +179,32 @@ Exit codes:
 		newConfigCmd(state),
 		newVersionCmd(state),
 	)
+
+	// Cobra-detected problems — unknown flags, wrong argument counts — are
+	// usage errors and must exit 2 like arat's own validation, not fall
+	// through to the generic 1. Flag errors route through FlagErrorFunc;
+	// Args validators are wrapped per command.
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return &exitErr{code: ExitUsage, err: err}
+	})
+	wrapArgsAsUsageErrors(root)
 	return root
+}
+
+// wrapArgsAsUsageErrors wraps every command's positional-args validator so a
+// failure carries ExitUsage instead of the generic exit code.
+func wrapArgsAsUsageErrors(c *cobra.Command) {
+	if orig := c.Args; orig != nil {
+		c.Args = func(cmd *cobra.Command, args []string) error {
+			if err := orig(cmd, args); err != nil {
+				return &exitErr{code: ExitUsage, err: err}
+			}
+			return nil
+		}
+	}
+	for _, sub := range c.Commands() {
+		wrapArgsAsUsageErrors(sub)
+	}
 }
 
 type state struct {
@@ -238,6 +270,12 @@ func Execute(d Deps, args []string) int {
 	var ee *exitErr
 	if errors.As(err, &ee) {
 		return ee.code
+	}
+	// Unknown subcommands surface as plain errors from cobra with no hook
+	// to wrap them (unlike flag and args errors); they are usage errors all
+	// the same.
+	if strings.HasPrefix(err.Error(), "unknown command") {
+		return ExitUsage
 	}
 	return ExitGeneric
 }
