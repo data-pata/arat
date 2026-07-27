@@ -45,6 +45,7 @@ type Deps struct {
 	Cwd           func() (string, error)
 	TicketFlow    TicketFlow
 	RepoFlow      RepoFlow
+	NameFlow      NameFlow
 	IsTTY         func() bool                       // returns whether stdin is a tty; defaults to false
 	Confirm       func(prompt string) (bool, error) // y/N prompt; returns true only on explicit yes
 }
@@ -54,6 +55,9 @@ type Deps struct {
 type LinearClient interface {
 	Available(ctx context.Context) error
 	IssueList(ctx context.Context, opts linear.IssueListOptions) ([]linear.Issue, error)
+	// IssueTitle fetches one issue's title, for deriving a workspace name
+	// from `arat new --ticket <id>` without a name argument.
+	IssueTitle(ctx context.Context, id string) (string, error)
 	IssueCreate(ctx context.Context, opts linear.IssueCreateOptions) (linear.IssueResult, error)
 	CommentAdd(ctx context.Context, opts linear.CommentAddOptions) error
 	// ContainerList returns Linear projects or initiatives ("project" /
@@ -85,8 +89,20 @@ type TicketFlowResult struct {
 	Cancelled      bool
 	Skip           bool
 	Ticket         string // when non-empty, attach this existing ticket
+	TicketTitle    string // the picked ticket's title, for deriving a workspace name
 	NewTitle       string // when non-empty, cmd creates a new ticket with this title
 	NewDescription string // optional description paired with NewTitle
+}
+
+// NameFlow is the interactive workspace-name prompt `arat new` opens when no
+// name argument was given, pre-filled with a slug derived from the issue
+// title. Returns the accepted name ("" when left empty) or Cancelled.
+type NameFlow func(ctx context.Context, def, ticket string, out io.Writer) (NameFlowResult, error)
+
+// NameFlowResult is the cmd-side outcome of NameFlow.
+type NameFlowResult struct {
+	Cancelled bool
+	Name      string
 }
 
 // RepoFlow is the interactive multi-select repo picker. Returns either the

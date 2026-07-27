@@ -422,3 +422,32 @@ func TestProjectCreate_badOutputIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no project in response")
 }
+
+func TestIssueTitle_queryAndParse(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"data": {"issue": {"title": "Fix postal race"}}}`)}
+	l := NewWithRunner(rr.run())
+
+	got, err := l.IssueTitle(t.Context(), "rex-666")
+	require.NoError(t, err)
+	assert.Equal(t, "Fix postal race", got)
+	require.Len(t, rr.calls, 1)
+	assert.Equal(t, "linear", rr.calls[0][0])
+	assert.Equal(t, "api", rr.calls[0][1])
+	assert.Contains(t, rr.calls[0][2], `issue(id: "REX-666")`, "identifier is upper-cased into the query")
+}
+
+func TestIssueTitle_notFound(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"data": {"issue": null}, "errors": [{"message": "Entity not found"}]}`)}
+	l := NewWithRunner(rr.run())
+	_, err := l.IssueTitle(t.Context(), "rex-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Entity not found")
+}
+
+func TestIssueTitle_emptyTitleIsAnError(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"data": {"issue": null}}`)}
+	l := NewWithRunner(rr.run())
+	_, err := l.IssueTitle(t.Context(), "rex-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}

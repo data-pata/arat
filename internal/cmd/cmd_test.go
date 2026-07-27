@@ -173,6 +173,7 @@ type depsOpts struct {
 	cwd           func() (string, error)
 	tickFlow      TicketFlow
 	repoFlow      RepoFlow
+	nameFlow      NameFlow
 	isTTY         func() bool
 	confirm       func(prompt string) (bool, error)
 }
@@ -199,6 +200,7 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 	deps.PickContainer = opts.pickContainer
 	deps.TicketFlow = opts.tickFlow
 	deps.RepoFlow = opts.repoFlow
+	deps.NameFlow = opts.nameFlow
 	deps.IsTTY = opts.isTTY
 	deps.Confirm = opts.confirm
 	exit := Execute(deps, args)
@@ -227,6 +229,10 @@ type fakeLinear struct {
 	projectCreateResult linear.Container
 	projectCreateErr    error
 	projectCreateCalls  []linear.ProjectCreateOptions
+
+	issueTitleResult string
+	issueTitleErr    error
+	issueTitleCalls  []string
 }
 
 func (f *fakeLinear) Available(context.Context) error {
@@ -246,6 +252,10 @@ func (f *fakeLinear) IssueCreate(_ context.Context, opts linear.IssueCreateOptio
 func (f *fakeLinear) CommentAdd(_ context.Context, opts linear.CommentAddOptions) error {
 	f.commentCalls = append(f.commentCalls, opts)
 	return f.commentErr
+}
+func (f *fakeLinear) IssueTitle(_ context.Context, id string) (string, error) {
+	f.issueTitleCalls = append(f.issueTitleCalls, id)
+	return f.issueTitleResult, f.issueTitleErr
 }
 func (f *fakeLinear) ProjectCreate(_ context.Context, opts linear.ProjectCreateOptions) (linear.Container, error) {
 	f.projectCreateCalls = append(f.projectCreateCalls, opts)
@@ -1437,4 +1447,137 @@ func TestUnknownCommand(t *testing.T) {
 func TestRoot_helpExits0(t *testing.T) {
 	r := run(t, []string{"--help"}, nil, nil)
 	assert.Equal(t, 0, r.exit)
+}
+
+// --- new: name derived from the issue title --------------------------
+
+func TestNew_nameDerivedFromTicketFlagNonTTY(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "rex-666--fix-postal-race", Path: "/p"}}
+	lc := &fakeLinear{available: true, issueTitleResult: "REX-666: Fix postal race"}
+	r := runWithDeps(t, []string{"new", "--ticket", "rex-666"}, nil, svc, depsOpts{linear: lc})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, []string{"rex-666"}, lc.issueTitleCalls)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "fix-postal-race", svc.newCalls[0].ShortName, "slug derived from the title, ticket prefix stripped")
+	assert.Equal(t, "rex-666", svc.newCalls[0].Ticket)
+}
+
+func TestNew_nameDerivedFromNewTicketTitleNonTTY(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--fix-the-bug", Path: "/p"}}
+	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
+	r := runWithDeps(t, []string{"new", "--new-ticket", "Fix the bug"}, nil, svc, depsOpts{linear: lc})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Empty(t, lc.issueTitleCalls, "the title is already in hand; no fetch")
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "fix-the-bug", svc.newCalls[0].ShortName)
+	assert.Equal(t, "abc-9", svc.newCalls[0].Ticket)
+}
+
+func TestNew_noNameNoTicketNonTTY(t *testing.T) {
+	svc := &fakeService{}
+	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "a workspace name is required")
+	assert.Empty(t, svc.newCalls)
+}
+
+func TestNew_titleFetchFailureNonTTY(t *testing.T) {
+	svc := &fakeService{}
+	lc := &fakeLinear{available: true, issueTitleErr: errors.New("api down")}
+	r := runWithDeps(t, []string{"new", "--ticket", "rex-666"}, nil, svc, depsOpts{linear: lc})
+	assert.Equal(t, ExitExternal, r.exit)
+	assert.Contains(t, r.stderr, "cannot derive a name from REX-666")
+	assert.Contains(t, r.stderr, "api down")
+	assert.Empty(t, svc.newCalls)
+}
+
+func TestNew_interactivePickPrefillsNamePrompt(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--fix-postal-race", Path: "/p"}}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-9", TicketTitle: "Fix postal race"}, nil
+	}
+	name := func(_ context.Context, def, ticket string, _ io.Writer) (NameFlowResult, error) {
+		assert.Equal(t, "fix-postal-race", def, "prompt pre-filled with the derived slug")
+		assert.Equal(t, "abc-9", ticket, "hint shows the lowercased ticket prefix")
+		return NameFlowResult{Name: def}, nil
+	}
+	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, nameFlow: name, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Empty(t, lc.issueTitleCalls, "the pick carried the title; no fetch")
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "fix-postal-race", svc.newCalls[0].ShortName)
+	assert.Equal(t, "abc-9", svc.newCalls[0].Ticket)
+}
+
+func TestNew_interactiveSkipThenTypedNameIsTicketless(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "spike", Path: "/p"}}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, opts TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		assert.True(t, opts.AllowSkip, "skip stays available in the no-name flow")
+		return TicketFlowResult{Skip: true}, nil
+	}
+	name := func(_ context.Context, def, ticket string, _ io.Writer) (NameFlowResult, error) {
+		assert.Empty(t, def, "no ticket, no default")
+		assert.Empty(t, ticket)
+		return NameFlowResult{Name: "spike"}, nil
+	}
+	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, nameFlow: name, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "spike", svc.newCalls[0].ShortName)
+	assert.Equal(t, "", svc.newCalls[0].Ticket)
+}
+
+func TestNew_interactiveSkipThenEmptyNameCancels(t *testing.T) {
+	svc := &fakeService{}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Skip: true}, nil
+	}
+	name := func(_ context.Context, _, _ string, _ io.Writer) (NameFlowResult, error) {
+		return NameFlowResult{Name: ""}, nil
+	}
+	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, nameFlow: name, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "cancelled: no workspace name")
+	assert.Empty(t, svc.newCalls)
+}
+
+func TestNew_interactiveNamePromptCancelled(t *testing.T) {
+	svc := &fakeService{}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-9", TicketTitle: "Fix postal race"}, nil
+	}
+	name := func(_ context.Context, _, _ string, _ io.Writer) (NameFlowResult, error) {
+		return NameFlowResult{Cancelled: true}, nil
+	}
+	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, nameFlow: name, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Empty(t, svc.newCalls)
+}
+
+func TestNew_titleFetchFailureTTYFallsBackToEmptyPrompt(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "rex-666--typed", Path: "/p"}}
+	lc := &fakeLinear{available: true, issueTitleErr: errors.New("api down")}
+	name := func(_ context.Context, def, _ string, _ io.Writer) (NameFlowResult, error) {
+		assert.Empty(t, def)
+		return NameFlowResult{Name: "typed"}, nil
+	}
+	r := runWithDeps(t, []string{"new", "--ticket", "rex-666"}, nil, svc, depsOpts{
+		linear: lc, nameFlow: name, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Contains(t, r.stderr, "could not fetch the title of REX-666")
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "typed", svc.newCalls[0].ShortName)
 }

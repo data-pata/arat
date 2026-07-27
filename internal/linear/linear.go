@@ -208,6 +208,42 @@ func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue,
 	return out, nil
 }
 
+// IssueTitle returns the title of a single issue, addressed by identifier
+// (e.g. "REX-666", any case). Used by `arat new` to derive a workspace name
+// from a --ticket flag, where the title is not otherwise in hand.
+func (l *Linear) IssueTitle(ctx context.Context, id string) (string, error) {
+	id = strings.ToUpper(strings.TrimSpace(id))
+	if id == "" {
+		return "", errors.New("issue id is required")
+	}
+	query := fmt.Sprintf(`{ issue(id: %q) { title } }`, id)
+
+	stdout, stderr, err := l.run(ctx, "linear", "api", query)
+	if err != nil {
+		return "", fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+	var resp struct {
+		Data struct {
+			Issue struct {
+				Title string `json:"title"`
+			} `json:"issue"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return "", fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+	}
+	if len(resp.Errors) > 0 {
+		return "", fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+	}
+	if resp.Data.Issue.Title == "" {
+		return "", fmt.Errorf("issue %s not found (or has no title)", id)
+	}
+	return resp.Data.Issue.Title, nil
+}
+
 // Container is a Linear project or initiative — the two things an arat
 // project workspace can be linked to.
 //

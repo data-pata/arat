@@ -29,12 +29,22 @@ func newNewCmd(s *state) *cobra.Command {
 	)
 
 	c := &cobra.Command{
-		Use:   "new <short-name>",
+		Use:   "new [short-name]",
 		Short: "Create a new workspace",
 		Long: `Create a new workspace under workspaces_dir, with one git worktree per repo.
 
 By default, branches off origin/HEAD on each repo's canonical clone. The new
 branch is named "<branch_prefix>--<short>" or "<branch_prefix>--<short>--<ticket>".
+
+The name is optional when a ticket supplies one. Without a name argument, the
+short name is derived from the issue title (lowercased, hyphenated, capped;
+the ticket id is prefixed to the directory name as usual). In a terminal the
+ticket flow runs first and a name prompt opens pre-filled with the derived
+slug — Enter accepts, typing overrides, Esc cancels; skipping the ticket
+leaves the prompt empty, where a typed name creates a ticketless workspace
+and an empty one cancels. With --ticket or --new-ticket the derivation is
+automatic (fetching the title from Linear when needed), so
+"arat new --ticket abc-12" works without prompts outside a terminal too.
 
 Projects and nesting, mirroring Linear:
   --project      create a container workspace instead of a leaf. It holds
@@ -84,10 +94,15 @@ default_repos and auto_repos_glob.
   arat new q3-billing --project --repos core-mono
   arat new invoice-pdf --ticket abc-12 --in q3-billing
   arat new pdf-fonts --ticket abc-18 --in q3-billing/abc-12--invoice-pdf
-  arat new pdf-fonts --ticket abc-18 --in . --from-parent`,
-		Args: cobra.ExactArgs(1),
+  arat new pdf-fonts --ticket abc-18 --in . --from-parent
+  arat new --ticket abc-12             # name derived from the issue title
+  arat new                             # pick/create a ticket, then name`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			short := args[0]
+			var short string
+			if len(args) == 1 {
+				short = args[0]
+			}
 			if err := validateTicketFlags(ticket, newTicket, newTicketDescription, noTicket); err != nil {
 				return &exitErr{code: ExitUsage, err: err}
 			}
@@ -147,6 +162,10 @@ default_repos and auto_repos_glob.
 				}
 			}
 
+			// titleForName is the issue title a missing name argument derives
+			// from, recorded wherever the ticket's title passes through.
+			var titleForName string
+
 			// --new-ticket: create a ticket up front, non-interactively.
 			if newTicket != "" {
 				if !cfg.Linear.Enabled {
@@ -157,6 +176,7 @@ default_repos and auto_repos_glob.
 					return err
 				}
 				ticket = id
+				titleForName = newTicket
 			}
 
 			// Interactive ticket flow: when neither --ticket, --new-ticket,
@@ -176,14 +196,49 @@ default_repos and auto_repos_glob.
 					switch {
 					case res.Ticket != "":
 						ticket = res.Ticket
+						titleForName = res.TicketTitle
 					case res.NewTitle != "":
 						id, err := createTicket(cmd.Context(), lc, cfg.Linear.DefaultTeam, res.NewTitle, res.NewDescription)
 						if err != nil {
 							return err
 						}
 						ticket = id
+						titleForName = res.NewTitle
 					}
 					// Skip path: continue with no ticket.
+				}
+			}
+
+			// No name argument: derive one from the issue title, confirmed in
+			// a pre-filled prompt when a terminal is available.
+			if short == "" {
+				if titleForName == "" && ticket != "" && cfg.Linear.Enabled && s.deps.NewLinear != nil {
+					t, err := issueTitleFor(cmd.Context(), s.deps.NewLinear(), ticket)
+					if err != nil {
+						// Interactively the prompt still works, just without a
+						// default; a script has no such fallback.
+						if !isInteractive(s.deps) || s.deps.NameFlow == nil {
+							return &exitErr{code: ExitExternal, err: fmt.Errorf("cannot derive a name from %s: %w — pass a name explicitly", strings.ToUpper(ticket), err)}
+						}
+						fmt.Fprintf(s.deps.Stderr, "⚠ could not fetch the title of %s: %v\n", strings.ToUpper(ticket), err)
+					}
+					titleForName = t
+				}
+				def := workspace.SlugFromTitle(titleForName, ticket)
+				switch {
+				case isInteractive(s.deps) && s.deps.NameFlow != nil:
+					res, err := s.deps.NameFlow(cmd.Context(), def, strings.ToLower(ticket), s.deps.Stderr)
+					if err != nil {
+						return &exitErr{code: ExitExternal, err: err}
+					}
+					if res.Cancelled || strings.TrimSpace(res.Name) == "" {
+						return &exitErr{code: ExitUsage, err: errors.New("cancelled: no workspace name")}
+					}
+					short = strings.TrimSpace(res.Name)
+				case def != "":
+					short = def
+				default:
+					return &exitErr{code: ExitUsage, err: errors.New("a workspace name is required — pass one, or --ticket/--new-ticket to derive it from the issue title")}
 				}
 			}
 
@@ -408,6 +463,15 @@ func validateTicketFlags(ticket, newTicket, newTicketDescription string, noTicke
 		return errors.New("--new-ticket-description requires --new-ticket")
 	}
 	return nil
+}
+
+// issueTitleFor fetches an issue's title for name derivation, verifying the
+// `linear` binary first so the error names the actual problem.
+func issueTitleFor(ctx context.Context, lc LinearClient, ticket string) (string, error) {
+	if err := lc.Available(ctx); err != nil {
+		return "", fmt.Errorf("`linear` binary unavailable: %w", err)
+	}
+	return lc.IssueTitle(ctx, ticket)
 }
 
 // createTicket shells out to the Linear client to create an issue with the

@@ -31,6 +31,7 @@ const (
 type TicketFlowResult struct {
 	Action         TicketAction
 	IssueID        string // populated when Action == ActionPick and a ticket was selected
+	IssueTitle     string // the picked issue's title, for deriving a workspace name
 	NewTitle       string // populated when Action == ActionCreate; cmd will shell out to linear
 	NewDescription string // optional description supplied alongside NewTitle
 }
@@ -94,7 +95,7 @@ func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, 
 		if picked == nil {
 			return TicketFlowResult{Action: ActionCancelled}, nil
 		}
-		return TicketFlowResult{Action: ActionPick, IssueID: picked.ID}, nil
+		return TicketFlowResult{Action: ActionPick, IssueID: picked.ID, IssueTitle: picked.Title}, nil
 	}
 	return TicketFlowResult{Action: ActionCancelled}, nil
 }

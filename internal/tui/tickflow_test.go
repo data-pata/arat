@@ -328,3 +328,46 @@ func TestActionModel_noSkipForAttach(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, ActionPick, updated.(*actionModel).chosen, "first entry without skip is Pick")
 }
+
+func TestDispatch_pickCarriesTitle(t *testing.T) {
+	lr := &fakeReader{issues: []linear.Issue{{ID: "ABC-1", Title: "Fix postal race"}}}
+	picker := func(_ context.Context, items []linear.Issue, _ io.Writer) (*linear.Issue, error) {
+		chosen := items[0]
+		return &chosen, nil
+	}
+	got, err := dispatchAction(t.Context(), ActionPick, lr, "ABC", picker, failingTitle(t), io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, "ABC-1", got.IssueID)
+	assert.Equal(t, "Fix postal race", got.IssueTitle, "title travels with the pick for name derivation")
+}
+
+func TestNameModel_enterAcceptsPrefill(t *testing.T) {
+	m := newNameModel("fix-postal-race", "rex-666")
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd)
+	nm := updated.(*nameModel)
+	assert.True(t, nm.done)
+	assert.False(t, nm.cancelled)
+	assert.Equal(t, "fix-postal-race", nm.input.Value())
+}
+
+func TestNameModel_escCancels(t *testing.T) {
+	m := newNameModel("fix-postal-race", "")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	assert.True(t, updated.(*nameModel).cancelled)
+}
+
+func TestNameModel_typingAppends(t *testing.T) {
+	m := newNameModel("fix", "")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	nm := next.(*nameModel)
+	assert.Equal(t, "fixe", nm.input.Value(), "cursor starts at the end of the pre-fill")
+}
+
+func TestNameModel_viewShowsTicketHint(t *testing.T) {
+	m := newNameModel("x", "rex-666")
+	assert.Contains(t, m.View(), "rex-666--<name>")
+	m2 := newNameModel("x", "")
+	assert.NotContains(t, m2.View(), "--<name>--")
+	assert.Contains(t, m2.View(), "directory: <name>")
+}

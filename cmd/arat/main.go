@@ -95,6 +95,7 @@ func main() {
 			switch res.Action {
 			case tui.ActionPick:
 				out_.Ticket = res.IssueID
+				out_.TicketTitle = res.IssueTitle
 			case tui.ActionSkip:
 				out_.Skip = true
 			case tui.ActionCancelled:
@@ -104,6 +105,13 @@ func main() {
 				out_.NewDescription = res.NewDescription
 			}
 			return out_, nil
+		},
+		NameFlow: func(ctx context.Context, def, ticket string, out io.Writer) (cmd.NameFlowResult, error) {
+			name, cancelled, err := tui.AskName(ctx, def, ticket, out)
+			if err != nil {
+				return cmd.NameFlowResult{}, err
+			}
+			return cmd.NameFlowResult{Cancelled: cancelled, Name: name}, nil
 		},
 		RepoFlow: func(ctx context.Context, cands []workspace.RepoCandidate, out io.Writer) (cmd.RepoFlowResult, error) {
 			selected, cancelled, err := tui.PickRepos(ctx, cands, out)
