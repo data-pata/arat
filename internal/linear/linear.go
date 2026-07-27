@@ -126,86 +126,127 @@ func (l *Linear) IssueCreate(ctx context.Context, opts IssueCreateOptions) (Issu
 
 // Issue is a Linear issue summary as returned by IssueList.
 type Issue struct {
-	ID    string `json:"id"` // identifier, e.g. "ABC-123"
-	Title string `json:"title"`
-	State string `json:"state"` // workflow state name
-	URL   string `json:"url"`
+	ID           string `json:"id"` // identifier, e.g. "ABC-123"
+	Title        string `json:"title"`
+	State        string `json:"state"`    // workflow state name
+	Assignee     string `json:"assignee"` // display name; "" when unassigned
+	AssigneeIsMe bool   `json:"assignee_is_me"`
+	URL          string `json:"url"`
 }
 
 // IssueListOptions controls IssueList.
 type IssueListOptions struct {
-	AssignedToMe bool   // filter to issues assigned to the authenticated viewer
-	Team         string // optional team key (e.g. "ABC")
-	Limit        int    // max issues to return; default 50
+	Team string // optional team key (e.g. "ABC")
 }
 
-// IssueList queries Linear via the GraphQL API (`linear api`) and returns
-// the matching issues.
-//
-// We use the GraphQL route — instead of `linear issue mine` — because the
-// CLI's table output is hard to parse robustly. The GraphQL response is
-// JSON we can decode directly.
-func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue, error) {
-	if opts.Limit <= 0 {
-		opts.Limit = 50
-	}
+// issueMaxPages caps IssueList's pagination loop: 250 nodes per page allows
+// 2000 open issues, far beyond a healthy team backlog, while bounding the
+// damage of a non-advancing cursor.
+const issueMaxPages = 8
 
-	// Build a filter object. Assignee.isMe gives the viewer's issues; we
-	// also restrict to non-completed states (triage/backlog/unstarted/started).
+// IssueList queries Linear via the GraphQL API (`linear api`) and returns
+// every open issue of the team (states triage/backlog/unstarted/started),
+// with assignee information so the picker built on it can rank the viewer's
+// own issues first and offer self-assignment on unassigned ones. It does not
+// filter by assignee: the issues one picks up when starting work are very
+// often unassigned backlog items, and a picker that silently omits them is
+// indistinguishable from the issue not existing.
+//
+// Paginated to completion for the same reason as ContainerList. We use the
+// GraphQL route — instead of `linear issue list` — because the CLI's table
+// output is hard to parse robustly.
+func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue, error) {
 	filterFields := []string{`state: { type: { in: ["triage", "backlog", "unstarted", "started"] } }`}
-	if opts.AssignedToMe {
-		filterFields = append(filterFields, `assignee: { isMe: { eq: true } }`)
-	}
 	if opts.Team != "" {
 		filterFields = append(filterFields, fmt.Sprintf(`team: { key: { eq: %q } }`, opts.Team))
 	}
 	filter := "{ " + strings.Join(filterFields, ", ") + " }"
 
-	query := fmt.Sprintf(`{
-  issues(filter: %s, first: %d, orderBy: updatedAt) {
-    nodes { identifier title state { name } url }
+	var out []Issue
+	cursor := ""
+	for range issueMaxPages {
+		after := ""
+		if cursor != "" {
+			after = fmt.Sprintf(", after: %q", cursor)
+		}
+		query := fmt.Sprintf(`{
+  issues(filter: %s, first: 250%s, orderBy: updatedAt) {
+    pageInfo { hasNextPage endCursor }
+    nodes { identifier title state { name } url assignee { displayName isMe } }
   }
-}`, filter, opts.Limit)
+}`, filter, after)
 
-	stdout, stderr, err := l.run(ctx, "linear", "api", query)
+		stdout, stderr, err := l.run(ctx, "linear", "api", query)
+		if err != nil {
+			return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+		}
+
+		var resp struct {
+			Data struct {
+				Issues struct {
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+					Nodes []struct {
+						Identifier string `json:"identifier"`
+						Title      string `json:"title"`
+						State      struct {
+							Name string `json:"name"`
+						} `json:"state"`
+						URL      string `json:"url"`
+						Assignee *struct {
+							DisplayName string `json:"displayName"`
+							IsMe        bool   `json:"isMe"`
+						} `json:"assignee"`
+					} `json:"nodes"`
+				} `json:"issues"`
+			} `json:"data"`
+			Errors []struct {
+				Message string `json:"message"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal(stdout, &resp); err != nil {
+			return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+		}
+		if len(resp.Errors) > 0 {
+			return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+		}
+
+		data := resp.Data.Issues
+		for _, n := range data.Nodes {
+			iss := Issue{
+				ID:    n.Identifier,
+				Title: n.Title,
+				State: n.State.Name,
+				URL:   n.URL,
+			}
+			if n.Assignee != nil {
+				iss.Assignee = n.Assignee.DisplayName
+				iss.AssigneeIsMe = n.Assignee.IsMe
+			}
+			out = append(out, iss)
+		}
+		if !data.PageInfo.HasNextPage || data.PageInfo.EndCursor == "" || data.PageInfo.EndCursor == cursor {
+			return out, nil
+		}
+		cursor = data.PageInfo.EndCursor
+	}
+	return nil, fmt.Errorf("linear api: issues pagination did not terminate after %d pages", issueMaxPages)
+}
+
+// IssueAssignMe assigns the issue to the authenticated viewer, via
+// `linear issue update <id> --assignee self`.
+func (l *Linear) IssueAssignMe(ctx context.Context, id string) error {
+	id = strings.ToUpper(strings.TrimSpace(id))
+	if id == "" {
+		return errors.New("issue id is required")
+	}
+	_, stderr, err := l.run(ctx, "linear", "issue", "update", id, "--assignee", "self")
 	if err != nil {
-		return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return fmt.Errorf("linear issue update %s --assignee self: %w: %s", id, err, strings.TrimSpace(string(stderr)))
 	}
-
-	var resp struct {
-		Data struct {
-			Issues struct {
-				Nodes []struct {
-					Identifier string `json:"identifier"`
-					Title      string `json:"title"`
-					State      struct {
-						Name string `json:"name"`
-					} `json:"state"`
-					URL string `json:"url"`
-				} `json:"nodes"`
-			} `json:"issues"`
-		} `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
-	}
-	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
-	}
-	if len(resp.Errors) > 0 {
-		return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
-	}
-
-	out := make([]Issue, 0, len(resp.Data.Issues.Nodes))
-	for _, n := range resp.Data.Issues.Nodes {
-		out = append(out, Issue{
-			ID:    n.Identifier,
-			Title: n.Title,
-			State: n.State.Name,
-			URL:   n.URL,
-		})
-	}
-	return out, nil
+	return nil
 }
 
 // IssueTitle returns the title of a single issue, addressed by identifier

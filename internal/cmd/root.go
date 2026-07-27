@@ -58,6 +58,9 @@ type LinearClient interface {
 	// IssueTitle fetches one issue's title, for deriving a workspace name
 	// from `arat new --ticket <id>` without a name argument.
 	IssueTitle(ctx context.Context, id string) (string, error)
+	// IssueAssignMe assigns an issue to the viewer, offered after picking an
+	// unassigned issue.
+	IssueAssignMe(ctx context.Context, id string) error
 	IssueCreate(ctx context.Context, opts linear.IssueCreateOptions) (linear.IssueResult, error)
 	CommentAdd(ctx context.Context, opts linear.CommentAddOptions) error
 	// ContainerList returns Linear projects or initiatives ("project" /
@@ -86,12 +89,13 @@ type TicketFlow func(ctx context.Context, lc linear.Reader, opts TicketFlowOptio
 // TicketFlowResult: a parallel of tui.TicketFlowResult, but lifted to the
 // cmd package so cmd code doesn't import tui directly.
 type TicketFlowResult struct {
-	Cancelled      bool
-	Skip           bool
-	Ticket         string // when non-empty, attach this existing ticket
-	TicketTitle    string // the picked ticket's title, for deriving a workspace name
-	NewTitle       string // when non-empty, cmd creates a new ticket with this title
-	NewDescription string // optional description paired with NewTitle
+	Cancelled        bool
+	Skip             bool
+	Ticket           string // when non-empty, attach this existing ticket
+	TicketTitle      string // the picked ticket's title, for deriving a workspace name
+	TicketUnassigned bool   // the picked ticket had no assignee; cmd may offer to self-assign
+	NewTitle         string // when non-empty, cmd creates a new ticket with this title
+	NewDescription   string // optional description paired with NewTitle
 }
 
 // NameFlow is the interactive workspace-name prompt `arat new` opens when no

@@ -189,36 +189,66 @@ func TestIssueList_argvAndDecoding(t *testing.T) {
 	rr := &recorderRunner{stdout: []byte(`{
   "data": {
     "issues": {
+      "pageInfo": {"hasNextPage": false, "endCursor": ""},
       "nodes": [
-        {"identifier": "ABC-1", "title": "First", "state": {"name": "Backlog"}, "url": "https://linear.app/x/issue/ABC-1"},
-        {"identifier": "ABC-2", "title": "Second", "state": {"name": "Started"}, "url": "https://linear.app/x/issue/ABC-2"}
+        {"identifier": "ABC-1", "title": "First", "state": {"name": "Backlog"}, "url": "https://linear.app/x/issue/ABC-1", "assignee": null},
+        {"identifier": "ABC-2", "title": "Second", "state": {"name": "Started"}, "url": "https://linear.app/x/issue/ABC-2", "assignee": {"displayName": "patsjo", "isMe": true}}
       ]
     }
   }
 }`)}
 	l := NewWithRunner(rr.run())
 
-	got, err := l.IssueList(t.Context(), IssueListOptions{AssignedToMe: true, Team: "ABC", Limit: 10})
+	got, err := l.IssueList(t.Context(), IssueListOptions{Team: "ABC"})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 	assert.Equal(t, Issue{ID: "ABC-1", Title: "First", State: "Backlog", URL: "https://linear.app/x/issue/ABC-1"}, got[0])
 	assert.Equal(t, "ABC-2", got[1].ID)
+	assert.Equal(t, "patsjo", got[1].Assignee)
+	assert.True(t, got[1].AssigneeIsMe)
+	assert.Empty(t, got[0].Assignee, "null assignee reads as unassigned")
 
 	require.Len(t, rr.calls, 1)
 	assert.Equal(t, "linear", rr.calls[0][0])
 	assert.Equal(t, "api", rr.calls[0][1])
 	q := rr.calls[0][2]
-	assert.Contains(t, q, `assignee: { isMe: { eq: true } }`)
+	assert.NotContains(t, q, `assignee: {`, "no assignee filter: unassigned issues must be fetched")
 	assert.Contains(t, q, `team: { key: { eq: "ABC" } }`)
-	assert.Contains(t, q, `first: 10`)
+	assert.Contains(t, q, `first: 250`)
+	assert.Contains(t, q, "assignee { displayName isMe }")
 }
 
-func TestIssueList_defaultLimit(t *testing.T) {
-	rr := &recorderRunner{stdout: []byte(`{"data":{"issues":{"nodes":[]}}}`)}
+func TestIssueList_paginatesToCompletion(t *testing.T) {
+	rr := &recorderRunner{}
+	rr.stdoutFn = func(args []string) []byte {
+		if !strings.Contains(args[1], "after:") {
+			return []byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":true,"endCursor":"c1"},"nodes":[{"identifier":"ABC-1","title":"a","state":{"name":"Backlog"},"url":"u"}]}}}`)
+		}
+		return []byte(`{"data":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[{"identifier":"ABC-2","title":"b","state":{"name":"Backlog"},"url":"u"}]}}}`)
+	}
 	l := NewWithRunner(rr.run())
-	_, err := l.IssueList(t.Context(), IssueListOptions{})
+	got, err := l.IssueList(t.Context(), IssueListOptions{Team: "ABC"})
 	require.NoError(t, err)
-	assert.Contains(t, rr.calls[0][2], "first: 50")
+	require.Len(t, got, 2)
+	assert.Equal(t, "ABC-2", got[1].ID)
+	require.Len(t, rr.calls, 2)
+	assert.Contains(t, rr.calls[1][2], `after: "c1"`)
+}
+
+func TestIssueAssignMe_argvShape(t *testing.T) {
+	rr := &recorderRunner{}
+	l := NewWithRunner(rr.run())
+	require.NoError(t, l.IssueAssignMe(t.Context(), "rex-625"))
+	require.Len(t, rr.calls, 1)
+	assert.Equal(t, []string{"linear", "issue", "update", "REX-625", "--assignee", "self"}, rr.calls[0])
+}
+
+func TestIssueAssignMe_errorSurfacesStderr(t *testing.T) {
+	rr := &recorderRunner{stderr: []byte("no such user"), err: errors.New("exit 1")}
+	l := NewWithRunner(rr.run())
+	err := l.IssueAssignMe(t.Context(), "rex-625")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no such user")
 }
 
 func TestIssueList_apiError(t *testing.T) {

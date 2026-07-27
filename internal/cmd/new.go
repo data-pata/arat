@@ -78,8 +78,10 @@ When using --new-ticket, --new-ticket-description <body> attaches an optional
 description (multi-line supported).
 
 If none are given and stdin is a tty, an interactive chooser opens: skip,
-pick from your open Linear issues, or type a title (and optional description)
-to create one inline. Outside a tty (AI / pipes), behaves like --no-ticket.
+pick from the team's open issues (yours first, then unassigned, then the
+rest), or type a title (and optional description) to create one inline.
+Picking an issue nobody is assigned to offers to assign it to you.
+Outside a tty (AI / pipes), behaves like --no-ticket.
 
 If --repos is omitted: in a tty, an interactive picker opens with
 default_repos + auto_repos_glob pre-selected and any other clones at root
@@ -197,6 +199,7 @@ default_repos and auto_repos_glob.
 					case res.Ticket != "":
 						ticket = res.Ticket
 						titleForName = res.TicketTitle
+						offerAssign(cmd.Context(), s, lc, ticket, res.TicketUnassigned)
 					case res.NewTitle != "":
 						id, err := createTicket(cmd.Context(), lc, cfg.Linear.DefaultTeam, res.NewTitle, res.NewDescription)
 						if err != nil {
@@ -463,6 +466,25 @@ func validateTicketFlags(ticket, newTicket, newTicketDescription string, noTicke
 		return errors.New("--new-ticket-description requires --new-ticket")
 	}
 	return nil
+}
+
+// offerAssign asks whether to self-assign a just-picked unassigned issue and
+// does so on a yes. Best-effort by design: an assignment failure is a warning,
+// not a reason to abort creating the workspace the user already committed to.
+func offerAssign(ctx context.Context, s *state, lc LinearClient, ticket string, unassigned bool) {
+	if !unassigned || s.deps.Confirm == nil {
+		return
+	}
+	upper := strings.ToUpper(ticket)
+	yes, err := s.deps.Confirm(fmt.Sprintf("%s is unassigned — assign it to you? [y/N] ", upper))
+	if err != nil || !yes {
+		return
+	}
+	if err := lc.IssueAssignMe(ctx, ticket); err != nil {
+		fmt.Fprintf(s.deps.Stderr, "⚠ could not assign %s: %v\n", upper, err)
+		return
+	}
+	fmt.Fprintf(s.deps.Stderr, "assigned %s to you\n", upper)
 }
 
 // issueTitleFor fetches an issue's title for name derivation, verifying the

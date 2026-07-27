@@ -233,6 +233,9 @@ type fakeLinear struct {
 	issueTitleResult string
 	issueTitleErr    error
 	issueTitleCalls  []string
+
+	assignMeErr   error
+	assignMeCalls []string
 }
 
 func (f *fakeLinear) Available(context.Context) error {
@@ -252,6 +255,10 @@ func (f *fakeLinear) IssueCreate(_ context.Context, opts linear.IssueCreateOptio
 func (f *fakeLinear) CommentAdd(_ context.Context, opts linear.CommentAddOptions) error {
 	f.commentCalls = append(f.commentCalls, opts)
 	return f.commentErr
+}
+func (f *fakeLinear) IssueAssignMe(_ context.Context, id string) error {
+	f.assignMeCalls = append(f.assignMeCalls, id)
+	return f.assignMeErr
 }
 func (f *fakeLinear) IssueTitle(_ context.Context, id string) (string, error) {
 	f.issueTitleCalls = append(f.issueTitleCalls, id)
@@ -1580,4 +1587,88 @@ func TestNew_titleFetchFailureTTYFallsBackToEmptyPrompt(t *testing.T) {
 	assert.Contains(t, r.stderr, "could not fetch the title of REX-666")
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "typed", svc.newCalls[0].ShortName)
+}
+
+// --- new: self-assign offer on unassigned pick -----------------------
+
+func TestNew_pickUnassignedOffersAssign(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-9", TicketTitle: "t", TicketUnassigned: true}, nil
+	}
+	var prompts []string
+	confirm := func(prompt string) (bool, error) {
+		prompts = append(prompts, prompt)
+		return true, nil
+	}
+	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, prompts, 1)
+	assert.Contains(t, prompts[0], "ABC-9 is unassigned")
+	assert.Equal(t, []string{"ABC-9"}, lc.assignMeCalls)
+	assert.Contains(t, r.stderr, "assigned ABC-9 to you")
+}
+
+func TestNew_pickUnassignedDeclinedLeavesIt(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-9", TicketUnassigned: true}, nil
+	}
+	confirm := func(string) (bool, error) { return false, nil }
+	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Empty(t, lc.assignMeCalls)
+	require.Len(t, svc.newCalls, 1, "declining assignment still creates the workspace")
+}
+
+func TestNew_pickAssignedNeverPrompts(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-9", TicketUnassigned: false}, nil
+	}
+	confirm := func(string) (bool, error) {
+		t.Fatal("must not prompt for an issue that already has an assignee")
+		return false, nil
+	}
+	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Empty(t, lc.assignMeCalls)
+}
+
+func TestNew_assignFailureIsAWarningNotAnError(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
+	lc := &fakeLinear{available: true, assignMeErr: errors.New("api down")}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-9", TicketUnassigned: true}, nil
+	}
+	confirm := func(string) (bool, error) { return true, nil }
+	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
+		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, "workspace creation must survive a failed assignment")
+	assert.Contains(t, r.stderr, "could not assign ABC-9")
+	require.Len(t, svc.newCalls, 1)
+}
+
+func TestAttach_pickUnassignedOffersAssign(t *testing.T) {
+	svc := &fakeService{workspaceAtRes: attachTaskWS(), attachResult: attachedResult()}
+	lc := &fakeLinear{available: true}
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+		return TicketFlowResult{Ticket: "ABC-7", TicketUnassigned: true}, nil
+	}
+	confirm := func(string) (bool, error) { return true, nil }
+	r := runWithDeps(t, []string{"attach"}, nil, svc, depsOpts{
+		cwd: cwdIn("/ws/my-feat"), linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
+	})
+	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, []string{"ABC-7"}, lc.assignMeCalls)
 }

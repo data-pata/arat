@@ -30,7 +30,9 @@ attaching the workspace you are standing in is the common case.
 
 Task workspaces:
   arat attach abc-123          attach that issue
-  arat attach                  in a terminal: pick from your open issues, or
+  arat attach                  in a terminal: pick from the team's open issues
+                               (yours and unassigned first; picking an
+                               unassigned one offers to assign it to you), or
                                type a title to create one inline
   arat attach --new "<title>"  create an issue in linear.default_team, then
                                attach it (-d adds a description)
@@ -166,6 +168,7 @@ func runAttachTask(cmd *cobra.Command, s *state, cfg *config.Config, svc Service
 			return &exitErr{code: ExitUsage, err: errors.New("cancelled")}
 		case res.Ticket != "":
 			ticket = res.Ticket
+			offerAssign(cmd.Context(), s, lc, ticket, res.TicketUnassigned)
 		case res.NewTitle != "":
 			id, err := createTicket(cmd.Context(), lc, cfg.Linear.DefaultTeam, res.NewTitle, res.NewDescription)
 			if err != nil {

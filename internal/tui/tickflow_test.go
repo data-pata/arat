@@ -190,7 +190,6 @@ func TestDispatch_pickFetchesAndPicks(t *testing.T) {
 	assert.Equal(t, "ABC-2", got.IssueID)
 
 	require.Len(t, lr.calls, 1)
-	assert.True(t, lr.calls[0].AssignedToMe)
 	assert.Equal(t, "ABC", lr.calls[0].Team)
 }
 
@@ -370,4 +369,38 @@ func TestNameModel_viewShowsTicketHint(t *testing.T) {
 	m2 := newNameModel("x", "")
 	assert.NotContains(t, m2.View(), "--<name>--")
 	assert.Contains(t, m2.View(), "directory: <name>")
+}
+
+func TestRankIssuesForPick(t *testing.T) {
+	issues := []linear.Issue{
+		{ID: "ABC-1", Assignee: "someone"},
+		{ID: "ABC-2"}, // unassigned
+		{ID: "ABC-3", Assignee: "me", AssigneeIsMe: true},
+		{ID: "ABC-4"}, // unassigned
+		{ID: "ABC-5", Assignee: "me", AssigneeIsMe: true},
+	}
+	rankIssuesForPick(issues)
+	got := make([]string, len(issues))
+	for i, iss := range issues {
+		got[i] = iss.ID
+	}
+	assert.Equal(t, []string{"ABC-3", "ABC-5", "ABC-2", "ABC-4", "ABC-1"}, got,
+		"mine first, then unassigned, then others — stable within each group")
+}
+
+func TestDispatch_pickCarriesUnassigned(t *testing.T) {
+	lr := &fakeReader{issues: []linear.Issue{{ID: "ABC-1", Title: "t"}}}
+	picker := func(_ context.Context, items []linear.Issue, _ io.Writer) (*linear.Issue, error) {
+		chosen := items[0]
+		return &chosen, nil
+	}
+	got, err := dispatchAction(t.Context(), ActionPick, lr, "ABC", picker, failingTitle(t), io.Discard)
+	require.NoError(t, err)
+	assert.True(t, got.IssueUnassigned)
+}
+
+func TestIssueItem_descriptionShowsAssignee(t *testing.T) {
+	assert.Contains(t, issueItem{iss: linear.Issue{State: "Backlog"}}.Description(), "unassigned")
+	assert.Contains(t, issueItem{iss: linear.Issue{State: "Backlog", Assignee: "patsjo", AssigneeIsMe: true}}.Description(), "you")
+	assert.Contains(t, issueItem{iss: linear.Issue{State: "Backlog", Assignee: "joakar"}}.Description(), "joakar")
 }

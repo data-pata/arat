@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/list"
@@ -29,11 +30,12 @@ const (
 
 // TicketFlowResult is the outcome of the whole interactive ticket flow.
 type TicketFlowResult struct {
-	Action         TicketAction
-	IssueID        string // populated when Action == ActionPick and a ticket was selected
-	IssueTitle     string // the picked issue's title, for deriving a workspace name
-	NewTitle       string // populated when Action == ActionCreate; cmd will shell out to linear
-	NewDescription string // optional description supplied alongside NewTitle
+	Action          TicketAction
+	IssueID         string // populated when Action == ActionPick and a ticket was selected
+	IssueTitle      string // the picked issue's title, for deriving a workspace name
+	IssueUnassigned bool   // the picked issue had no assignee; cmd may offer to self-assign
+	NewTitle        string // populated when Action == ActionCreate; cmd will shell out to linear
+	NewDescription  string // optional description supplied alongside NewTitle
 }
 
 // issuePicker is the type of pickIssue, lifted out for tests.
@@ -79,15 +81,16 @@ func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, 
 	case ActionCreate:
 		return promptCreate(ctx, ask, out)
 	case ActionPick:
-		issues, err := lc.IssueList(ctx, linear.IssueListOptions{AssignedToMe: true, Team: team})
+		issues, err := lc.IssueList(ctx, linear.IssueListOptions{Team: team})
 		if err != nil {
 			return TicketFlowResult{}, fmt.Errorf("list issues: %w", err)
 		}
 		if len(issues) == 0 {
-			// Nothing assigned: fall through to the create prompt so the
+			// Nothing open at all: fall through to the create prompt so the
 			// user doesn't have to bail out and re-run.
 			return promptCreate(ctx, ask, out)
 		}
+		rankIssuesForPick(issues)
 		picked, err := pick(ctx, issues, out)
 		if err != nil {
 			return TicketFlowResult{}, err
@@ -95,7 +98,12 @@ func dispatchAction(ctx context.Context, action TicketAction, lc linear.Reader, 
 		if picked == nil {
 			return TicketFlowResult{Action: ActionCancelled}, nil
 		}
-		return TicketFlowResult{Action: ActionPick, IssueID: picked.ID, IssueTitle: picked.Title}, nil
+		return TicketFlowResult{
+			Action:          ActionPick,
+			IssueID:         picked.ID,
+			IssueTitle:      picked.Title,
+			IssueUnassigned: picked.Assignee == "",
+		}, nil
 	}
 	return TicketFlowResult{Action: ActionCancelled}, nil
 }
@@ -145,7 +153,7 @@ func newActionModel(allowSkip bool) *actionModel {
 		items = append(items, actionItem{"Skip ticket", "create the workspace without a ticket attached", ActionSkip})
 	}
 	items = append(items,
-		actionItem{"Pick existing", "choose from your open Linear issues", ActionPick},
+		actionItem{"Pick existing", "choose from the team's open issues — yours and unassigned first", ActionPick},
 		actionItem{"Create new", "type a title (and optional description) to create one inline", ActionCreate},
 	)
 	delegate := list.NewDefaultDelegate()
@@ -319,13 +327,38 @@ func askCompose(ctx context.Context, out io.Writer) (composeResult, error) {
 	return composeResult{Title: cm.title.Value(), Description: cm.desc.Value()}, nil
 }
 
+// rankIssuesForPick orders the list yours-first: the viewer's own issues,
+// then unassigned ones (the natural next-thing-to-pick-up pool), then
+// everyone else's, keeping the API's recent-activity order within each group.
+func rankIssuesForPick(issues []linear.Issue) {
+	rank := func(i linear.Issue) int {
+		switch {
+		case i.AssigneeIsMe:
+			return 0
+		case i.Assignee == "":
+			return 1
+		}
+		return 2
+	}
+	sort.SliceStable(issues, func(a, b int) bool { return rank(issues[a]) < rank(issues[b]) })
+}
+
 // --- issue picker model ---------------------------------------------
 
 type issueItem struct{ iss linear.Issue }
 
-func (i issueItem) Title() string       { return i.iss.ID + "  " + i.iss.Title }
-func (i issueItem) Description() string { return dimStyle.Render(i.iss.State) }
-func (i issueItem) FilterValue() string { return i.iss.ID + " " + i.iss.Title }
+func (i issueItem) Title() string { return i.iss.ID + "  " + i.iss.Title }
+func (i issueItem) Description() string {
+	who := i.iss.Assignee
+	switch {
+	case i.iss.AssigneeIsMe:
+		who = "you"
+	case who == "":
+		who = "unassigned"
+	}
+	return dimStyle.Render(i.iss.State + " · " + who)
+}
+func (i issueItem) FilterValue() string { return i.iss.ID + " " + i.iss.Title + " " + i.iss.Assignee }
 
 type issueModel struct {
 	list   list.Model

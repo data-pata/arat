@@ -96,6 +96,7 @@ func main() {
 			case tui.ActionPick:
 				out_.Ticket = res.IssueID
 				out_.TicketTitle = res.IssueTitle
+				out_.TicketUnassigned = res.IssueUnassigned
 			case tui.ActionSkip:
 				out_.Skip = true
 			case tui.ActionCancelled:
