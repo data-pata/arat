@@ -137,6 +137,7 @@ cd <workspaces_dir>/q3-billing
 arat new invoice-pdf --ticket abc-12              # nested here, inferred from cwd
 arat new dunning --project                        # a sub-project
 arat new retry --ticket abc-20 --in q3-billing/dunning
+arat new hotfix --ticket abc-21 --from-project    # stack on the project's branch
 ```
 
 ```
@@ -162,10 +163,11 @@ Things worth knowing:
 - **Worktrees are opt-in for projects.** `--project` alone creates no
   worktrees, because grouping is the usual reason to make one. Pass `--repos`
   to give the project its own branch.
-- **Nested work stacks on the project's branch.** When a project has a
-  worktree for a repo, workspaces created inside it branch off the project's
-  branch for that repo instead of `origin/HEAD`. Repos the project does not
-  carry fall back to the normal base.
+- **Nesting does not change the base branch.** A workspace created inside a
+  project still branches off the latest default branch, the same as a
+  top-level one. Pass `--from-project` to stack on the project's own branch
+  for every repo it carries a worktree for. Repos the project does not carry
+  keep the normal base either way.
 - **Removal is explicit.** `arat rm` on a project that still contains
   workspaces refuses (exit 4) until you pass `--recursive`. `--force` does not
   substitute for it: `--force` is about discarding *changes*, `--recursive` is

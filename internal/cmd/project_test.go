@@ -102,6 +102,67 @@ func TestNew_outsideAnyProjectStaysTopLevel(t *testing.T) {
 	assert.Empty(t, svc.newCalls[0].Parent)
 }
 
+func TestNew_nestingAloneDoesNotInheritBranches(t *testing.T) {
+	svc := &fakeService{
+		getKnown: map[string]*workspace.Workspace{
+			"q3-billing": {Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject},
+		},
+		newResult: &workspace.Workspace{Name: "x", Ref: "q3-billing/x", Path: "/p"},
+	}
+	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing"}, nil, svc)
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.False(t, svc.newCalls[0].InheritParentBranches)
+}
+
+func TestNew_fromProjectSetsInheritance(t *testing.T) {
+	svc := &fakeService{
+		getKnown: map[string]*workspace.Workspace{
+			"q3-billing": {Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject},
+		},
+		newResult: &workspace.Workspace{Name: "x", Ref: "q3-billing/x", Path: "/p"},
+	}
+	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing", "--from-project"}, nil, svc)
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.True(t, svc.newCalls[0].InheritParentBranches)
+}
+
+func TestNew_fromProjectInfersParentFromCwd(t *testing.T) {
+	svc := &fakeService{
+		projectAtRes: &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject},
+		newResult:    &workspace.Workspace{Name: "x", Ref: "q3-billing/x", Path: "/p"},
+	}
+	cwdFn := func() (string, error) { return "/ws/q3-billing/somewhere", nil }
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-project"}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "q3-billing", svc.newCalls[0].Parent)
+	assert.True(t, svc.newCalls[0].InheritParentBranches)
+}
+
+func TestNew_fromProjectOutsideAnyProjectIsUsageError(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Ref: "x", Path: "/p"}}
+	cwdFn := func() (string, error) { return "/somewhere/else", nil }
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-project"}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "not inside a project")
+	assert.Empty(t, svc.newCalls)
+}
+
+func TestNew_fromProjectConflictsWithFromCurrent(t *testing.T) {
+	svc := &fakeService{}
+	r := run(t, []string{"new", "x", "--no-ticket", "--from-project", "--from-current"}, nil, svc)
+
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "mutually exclusive")
+	assert.Empty(t, svc.newCalls)
+}
+
 func TestNew_projectSkipsInteractiveRepoPicker(t *testing.T) {
 	svc := &fakeService{
 		newResult:        &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing", Path: "/p"},

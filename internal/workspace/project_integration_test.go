@@ -1,6 +1,7 @@
 package workspace
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -46,12 +47,11 @@ func TestNew_project_rejectsTicket(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidInput)
 }
 
-func TestNew_insideProject_nestsAndInheritsBase(t *testing.T) {
-	root := setupRoot(t, "repo-a", "repo-b")
-	svc := newSvc(t, root)
-	ctx := t.Context()
-
-	// A project that carries its own worktree on an integration branch.
+// projectWithCommit creates a project carrying a worktree of repo-a on its own
+// branch, with one commit that origin/HEAD does not have. The returned marker
+// file is present in a worktree exactly when it branched off the project.
+func projectWithCommit(t *testing.T, svc *Service, ctx context.Context) (*Workspace, string) {
+	t.Helper()
 	proj, err := svc.New(ctx, NewOptions{
 		ShortName: "q3-billing",
 		Kind:      KindProject,
@@ -59,14 +59,21 @@ func TestNew_insideProject_nestsAndInheritsBase(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, proj.Repos, 1)
-	assert.Equal(t, "ps--q3-billing", proj.Repos[0].Branch)
+	require.Equal(t, "ps--q3-billing", proj.Repos[0].Branch)
 
-	// Commit on the project branch so the child has something to inherit
-	// that origin/HEAD does not have.
 	wt := filepath.Join(proj.Path, "repo-a")
 	require.NoError(t, os.WriteFile(filepath.Join(wt, "project-only.txt"), []byte("x"), 0o644))
 	runGit(t, wt, "add", ".")
 	runGit(t, wt, "commit", "-m", "project scaffolding")
+	return proj, "project-only.txt"
+}
+
+func TestNew_insideProject_nestsButKeepsDefaultBase(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	proj, marker := projectWithCommit(t, svc, ctx)
 
 	child, err := svc.New(ctx, NewOptions{
 		ShortName: "invoice-pdf",
@@ -81,9 +88,9 @@ func TestNew_insideProject_nestsAndInheritsBase(t *testing.T) {
 	assert.Equal(t, "q3-billing", child.Parent)
 	assert.Equal(t, filepath.Join(proj.Path, "abc-12--invoice-pdf"), child.Path)
 
-	// The child branched off the project's branch, so the project-only
-	// commit is present in the child's worktree.
-	assert.FileExists(t, filepath.Join(child.Path, "repo-a", "project-only.txt"))
+	// Nesting alone does not inherit: the child started from the default
+	// base, so the project-only commit is absent.
+	assert.NoFileExists(t, filepath.Join(child.Path, "repo-a", marker))
 
 	// The tree reflects the nesting.
 	items, err := svc.List(ctx)
@@ -91,6 +98,57 @@ func TestNew_insideProject_nestsAndInheritsBase(t *testing.T) {
 	require.Len(t, items, 1)
 	require.Len(t, items[0].Children, 1)
 	assert.Equal(t, "q3-billing/abc-12--invoice-pdf", items[0].Children[0].Ref)
+}
+
+func TestNew_insideProject_inheritsBaseWhenAsked(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	_, marker := projectWithCommit(t, svc, ctx)
+
+	child, err := svc.New(ctx, NewOptions{
+		ShortName:             "invoice-pdf",
+		Ticket:                "abc-12",
+		Repos:                 []string{"repo-a"},
+		Parent:                "q3-billing",
+		InheritParentBranches: true,
+	})
+	require.NoError(t, err)
+
+	// Opted in, so the child branched off the project's branch and carries
+	// the project-only commit.
+	assert.FileExists(t, filepath.Join(child.Path, "repo-a", marker))
+}
+
+func TestNew_insideProject_explicitBaseBeatsInheritance(t *testing.T) {
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	_, marker := projectWithCommit(t, svc, ctx)
+
+	child, err := svc.New(ctx, NewOptions{
+		ShortName:             "invoice-pdf",
+		Repos:                 []string{"repo-a"},
+		Parent:                "q3-billing",
+		InheritParentBranches: true,
+		BaseByRepo:            map[string]string{"repo-a": "main"},
+	})
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(child.Path, "repo-a", marker))
+}
+
+func TestNew_inheritWithoutParentIsInvalid(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+
+	_, err := svc.New(t.Context(), NewOptions{
+		ShortName:             "loose",
+		Repos:                 []string{"repo-a"},
+		InheritParentBranches: true,
+	})
+	assert.ErrorIs(t, err, ErrInvalidInput)
 }
 
 func TestNew_insideProject_repoNotInProjectUsesDefaultBase(t *testing.T) {
@@ -101,11 +159,13 @@ func TestNew_insideProject_repoNotInProjectUsesDefaultBase(t *testing.T) {
 	_, err := svc.New(ctx, NewOptions{ShortName: "q3-billing", Kind: KindProject, Repos: []string{"repo-a"}})
 	require.NoError(t, err)
 
-	// repo-b has no counterpart in the project, so it falls back to Base.
+	// repo-b has no counterpart in the project, so it falls back to Base
+	// even though inheritance was requested.
 	child, err := svc.New(ctx, NewOptions{
-		ShortName: "wider",
-		Repos:     []string{"repo-a", "repo-b"},
-		Parent:    "q3-billing",
+		ShortName:             "wider",
+		Repos:                 []string{"repo-a", "repo-b"},
+		Parent:                "q3-billing",
+		InheritParentBranches: true,
 	})
 	require.NoError(t, err)
 	assert.Len(t, child.Repos, 2)

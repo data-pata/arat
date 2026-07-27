@@ -25,6 +25,7 @@ func newNewCmd(s *state) *cobra.Command {
 		codeWorkspace        bool
 		projectMode          bool
 		in                   string
+		fromProject          bool
 	)
 
 	c := &cobra.Command{
@@ -36,21 +37,23 @@ By default, branches off origin/HEAD on each repo's canonical clone. The new
 branch is named "<branch_prefix>--<short>" or "<branch_prefix>--<short>--<ticket>".
 
 Projects and nesting:
-  --project     create a container workspace instead of a leaf. It holds other
-                workspaces as subdirectories and gets no worktrees unless
-                --repos is given. Projects can contain projects. A project
-                attaches to a Linear project or initiative via
-                "arat project link", never to an issue.
-  --in <ref>    create this workspace inside the named project.
+  --project       create a container workspace instead of a leaf. It holds
+                  other workspaces as subdirectories and gets no worktrees
+                  unless --repos is given. Projects can contain projects. A
+                  project attaches to a Linear project or initiative via
+                  "arat project link", never to an issue.
+  --in <ref>      create this workspace inside the named project.
+  --from-project  branch off the containing project's own branches.
 
 Without --in, the parent is inferred from cwd: running this from anywhere
 inside a project creates the new workspace in that project (a task workspace
 cannot hold children, so standing in one means "a sibling in the same
 project"). Outside any project, the workspace is created at the top level.
 
-When the parent project has a worktree of its own for a repo, the new
-workspace branches off the project's branch for that repo rather than
-origin/HEAD.
+Nesting alone does not change where the worktrees start. A workspace created
+inside a project still branches off the latest default branch. Pass
+--from-project to branch off the project's own branch for every repo it
+carries a worktree for; repos it does not carry keep the default base.
 
 Ticket mode (one of, mutually exclusive):
   --ticket <id>        attach an existing ticket (e.g. abc-123)
@@ -75,7 +78,8 @@ default_repos and auto_repos_glob.
   arat new postal-fix --ticket abc-123 --repos core-mono,ui-app
   arat new q3-billing --project
   arat new q3-billing --project --repos core-mono
-  arat new invoice-pdf --ticket abc-12 --in q3-billing`,
+  arat new invoice-pdf --ticket abc-12 --in q3-billing
+  arat new invoice-pdf --ticket abc-12 --in q3-billing --from-project`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			short := args[0]
@@ -84,6 +88,12 @@ default_repos and auto_repos_glob.
 			}
 			if projectMode && (ticket != "" || newTicket != "") {
 				return &exitErr{code: ExitUsage, err: errors.New("--project cannot take a ticket: a project links to a Linear project or initiative via `arat project link`, not to an issue")}
+			}
+			// Both pick the commit the new worktrees branch off, from
+			// different workspaces, so honouring both would mean silently
+			// dropping one of them.
+			if fromProject && fromCurrent {
+				return &exitErr{code: ExitUsage, err: errors.New("--from-project and --from-current are mutually exclusive: they name different branches to start from")}
 			}
 
 			cfg, err := s.loadConfig()
@@ -95,6 +105,11 @@ default_repos and auto_repos_glob.
 			parent, err := resolveNewParent(cmd.Context(), svc, s.deps.Cwd, in)
 			if err != nil {
 				return &exitErr{code: ExitUsage, err: err}
+			}
+			// Fail here rather than in the domain layer so the message can
+			// name the flags that would fix it.
+			if fromProject && parent == "" {
+				return &exitErr{code: ExitUsage, err: errors.New("--from-project: not inside a project — pass --in <project-ref> or run from within one")}
 			}
 
 			// Interactive repo flow: when --repos wasn't given AND we have a
@@ -166,6 +181,7 @@ default_repos and auto_repos_glob.
 				Ticket:                strings.ToLower(ticket),
 				Repos:                 repos,
 				Parent:                parent,
+				InheritParentBranches: fromProject,
 				GenerateCodeWorkspace: codeWorkspace,
 			}
 			if projectMode {
@@ -242,6 +258,7 @@ default_repos and auto_repos_glob.
 	c.Flags().BoolVar(&codeWorkspace, "code-workspace", false, "generate a .code-workspace file (also enabled by config generate_code_workspace)")
 	c.Flags().BoolVar(&projectMode, "project", false, "create a project workspace: a container for other workspaces, with no worktrees unless --repos is given")
 	c.Flags().StringVar(&in, "in", "", "ref of the project to create this workspace inside (default: the project containing cwd, if any)")
+	c.Flags().BoolVar(&fromProject, "from-project", false, "branch new worktrees off the containing project's own branches instead of the default base")
 	return c
 }
 

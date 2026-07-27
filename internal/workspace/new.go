@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -39,11 +40,22 @@ type NewOptions struct {
 	// Parent is the ref of the project to create this workspace inside
 	// ("q3-billing", "q3-billing/dunning"). Empty creates at the top level.
 	//
-	// When the parent project has a worktree of its own for a given repo,
-	// the new workspace branches off the parent's branch for that repo
-	// instead of Base, so work inside a project stacks on the project's
-	// integration branch. An explicit BaseByRepo entry still wins.
+	// Nesting on its own says nothing about which commit the worktrees
+	// branch off: a nested workspace still starts from Base (the latest
+	// upstream default branch) unless InheritParentBranches is set.
 	Parent string
+
+	// InheritParentBranches makes the new workspace branch off the parent
+	// project's own branch for every repo the parent carries a worktree
+	// for, instead of Base. Repos the parent does not carry still use Base,
+	// and an explicit BaseByRepo entry wins over the inherited value.
+	//
+	// This is opt-in rather than implied by Parent. Grouping work under a
+	// project is common, whereas wanting that work to start from the
+	// project's in-progress branch instead of the latest default branch is
+	// a specific choice, and doing it silently would strand a workspace on
+	// stale commits the user never asked to build on.
+	InheritParentBranches bool
 
 	// Phase 7 extras (all optional):
 	//
@@ -213,11 +225,15 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 // resolveNewParent locates the directory a new workspace is created in.
 //
 // It returns the parent directory on disk, the parent's ref (empty at top
-// level), and the per-repo base branches inherited from the parent project's
-// own worktrees. Explicit NewOptions.BaseByRepo entries override the
-// inherited ones.
+// level), and the per-repo base branches to create worktrees from. The bases
+// are the caller's BaseByRepo unless InheritParentBranches asks for the
+// parent project's branches to be folded in, in which case explicit
+// BaseByRepo entries still win.
 func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, ref string, baseByRepo map[string]string, err error) {
 	if opts.Parent == "" {
+		if opts.InheritParentBranches {
+			return "", "", nil, fmt.Errorf("%w: cannot inherit branches without a parent project", ErrInvalidInput)
+		}
 		return s.WorkspacesDir, "", opts.BaseByRepo, nil
 	}
 
@@ -228,19 +244,20 @@ func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, r
 	if !parent.IsProject() {
 		return "", "", nil, fmt.Errorf("%w: %s is a task workspace, not a project — only projects can contain workspaces", ErrInvalidInput, parent.Ref)
 	}
+	if !opts.InheritParentBranches {
+		return parent.Path, parent.Ref, opts.BaseByRepo, nil
+	}
 
-	// Inherit the project's branch per repo so a workspace created inside a
-	// project stacks on the project's integration branch rather than
-	// origin/HEAD. Explicit overrides win.
+	// Stack on the project's integration branch per repo. Repos the project
+	// has no worktree for are absent here and so fall back to Base, and an
+	// explicit override still wins.
 	merged := make(map[string]string, len(parent.Repos)+len(opts.BaseByRepo))
 	for _, r := range parent.Repos {
 		if r.Branch != "" {
 			merged[r.Name] = r.Branch
 		}
 	}
-	for repo, base := range opts.BaseByRepo {
-		merged[repo] = base
-	}
+	maps.Copy(merged, opts.BaseByRepo)
 	return parent.Path, parent.Ref, merged, nil
 }
 

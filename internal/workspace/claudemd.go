@@ -75,7 +75,7 @@ func renderClaudeMD(opts NewOptions, repos []string, branch, ticketURL string, n
 func renderProjectClaudeMD(opts NewOptions, repos []string, branch, date string) string {
 	repoSection := "**Repos**: none — this project groups workspaces only\n"
 	if len(repos) > 0 {
-		repoSection = fmt.Sprintf("**Branch**: `%s`\n**Repos**: %s\n\nWorkspaces created inside this project branch off the branch above rather than origin/HEAD.\n",
+		repoSection = fmt.Sprintf("**Branch**: `%s`\n**Repos**: %s\n\nWorkspaces created inside this project branch off the latest default branch. Pass `--from-project` to start them from the branch above instead.\n",
 			branch, strings.Join(repos, " "))
 	}
 
