@@ -76,6 +76,10 @@ type RepoStatus struct {
 type RepoCandidate struct {
 	Name     string `json:"name"`
 	Selected bool   `json:"selected"`
+	// Source records why the candidate is offered: "default_repos" or
+	// "auto_repos_glob" for pre-selected entries, "other clone" for the rest.
+	// The picker shows it, so a pre-checked box explains itself.
+	Source string `json:"source"`
 }
 
 // ParseName splits a workspace dir name into (ticket, short).

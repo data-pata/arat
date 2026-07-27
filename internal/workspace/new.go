@@ -422,12 +422,25 @@ func (s *Service) ListRepoCandidates() ([]RepoCandidate, error) {
 	}
 	sort.Strings(others)
 
+	// Source labels: a pre-selected candidate is either an explicit
+	// default_repos entry or an auto_repos_glob match. Listing which is
+	// which in the picker turns "why is this box checked" into something
+	// the user can read off the row instead of having to recall config.
+	fromDefaults := make(map[string]struct{}, len(s.DefaultRepos))
+	for _, r := range s.DefaultRepos {
+		fromDefaults[r] = struct{}{}
+	}
+
 	out := make([]RepoCandidate, 0, len(preselected)+len(others))
 	for _, n := range preselected {
-		out = append(out, RepoCandidate{Name: n, Selected: true})
+		source := "auto_repos_glob"
+		if _, ok := fromDefaults[n]; ok {
+			source = "default_repos"
+		}
+		out = append(out, RepoCandidate{Name: n, Selected: true, Source: source})
 	}
 	for _, n := range others {
-		out = append(out, RepoCandidate{Name: n, Selected: false})
+		out = append(out, RepoCandidate{Name: n, Selected: false, Source: "other clone"})
 	}
 	return out, nil
 }

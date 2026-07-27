@@ -661,11 +661,11 @@ func TestListRepoCandidates_preselectsDefaultPlusGlob(t *testing.T) {
 	// Selected first (default+glob in their resolution order), then unselected
 	// alphabetically.
 	assert.Equal(t, []RepoCandidate{
-		{Name: "alpha", Selected: true},
-		{Name: "core-app", Selected: true},
-		{Name: "infra-k8s", Selected: true},
-		{Name: "extra", Selected: false},
-		{Name: "stray", Selected: false},
+		{Name: "alpha", Selected: true, Source: "default_repos"},
+		{Name: "core-app", Selected: true, Source: "auto_repos_glob"},
+		{Name: "infra-k8s", Selected: true, Source: "auto_repos_glob"},
+		{Name: "extra", Selected: false, Source: "other clone"},
+		{Name: "stray", Selected: false, Source: "other clone"},
 	}, got)
 }
 

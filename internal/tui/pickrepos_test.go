@@ -12,7 +12,11 @@ import (
 )
 
 func newRepoTestModel(items ...workspace.RepoCandidate) *repoModel {
-	return newRepoModel(items)
+	m := newRepoModel(items)
+	// A list only renders rows once it has a size; simulate the WindowSizeMsg
+	// bubbletea sends on startup.
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	return next.(*repoModel)
 }
 
 func TestRepoModel_initialChecksMirrorCandidates(t *testing.T) {
@@ -22,9 +26,9 @@ func TestRepoModel_initialChecksMirrorCandidates(t *testing.T) {
 		workspace.RepoCandidate{Name: "c", Selected: true},
 	)
 	assert.Equal(t, 2, m.countChecked())
-	assert.True(t, m.items[0].checked)
-	assert.False(t, m.items[1].checked)
-	assert.True(t, m.items[2].checked)
+	assert.True(t, m.states[0].checked)
+	assert.False(t, m.states[1].checked)
+	assert.True(t, m.states[2].checked)
 }
 
 func TestRepoModel_spaceTogglesCurrent(t *testing.T) {
@@ -35,13 +39,13 @@ func TestRepoModel_spaceTogglesCurrent(t *testing.T) {
 	// Cursor starts at 0; space should uncheck "a".
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	rm := updated.(*repoModel)
-	assert.False(t, rm.items[0].checked)
+	assert.False(t, rm.states[0].checked)
 	// Down + space toggles "b" on.
 	updated, _ = rm.Update(tea.KeyMsg{Type: tea.KeyDown})
 	rm = updated.(*repoModel)
 	updated, _ = rm.Update(tea.KeyMsg{Type: tea.KeySpace})
 	rm = updated.(*repoModel)
-	assert.True(t, rm.items[1].checked)
+	assert.True(t, rm.states[1].checked)
 }
 
 func TestRepoModel_aSelectsAllNDeselects(t *testing.T) {
@@ -62,9 +66,8 @@ func TestRepoModel_enterRefusesEmptySelection(t *testing.T) {
 	m := newRepoTestModel(workspace.RepoCandidate{Name: "a", Selected: false})
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	rm := updated.(*repoModel)
-	assert.Nil(t, cmd, "must not quit on empty-confirm")
-	assert.False(t, rm.confirmed)
-	assert.NotEmpty(t, rm.hint, "should show a hint asking the user to select something")
+	assert.False(t, rm.confirmed, "must not confirm an empty selection")
+	assert.NotNil(t, cmd, "a status message cmd is emitted, not a quit")
 }
 
 func TestRepoModel_enterConfirmsWithSelection(t *testing.T) {
@@ -95,35 +98,57 @@ func TestRepoModel_escAndCtrlCCancel(t *testing.T) {
 	}
 }
 
-func TestRepoModel_cursorBoundaries(t *testing.T) {
+func TestRepoModel_titleTracksSelectionCount(t *testing.T) {
 	m := newRepoTestModel(
-		workspace.RepoCandidate{Name: "a"},
-		workspace.RepoCandidate{Name: "b"},
+		workspace.RepoCandidate{Name: "a", Selected: true},
+		workspace.RepoCandidate{Name: "b", Selected: false},
 	)
-	// Up at top is a no-op (no panic, cursor stays at 0).
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	assert.Contains(t, m.list.Title, "1/2 selected")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	rm := updated.(*repoModel)
-	assert.Equal(t, 0, rm.cursor)
-	// Down to bottom, then Down again is a no-op.
-	updated, _ = rm.Update(tea.KeyMsg{Type: tea.KeyDown})
-	rm = updated.(*repoModel)
-	assert.Equal(t, 1, rm.cursor)
-	updated, _ = rm.Update(tea.KeyMsg{Type: tea.KeyDown})
-	rm = updated.(*repoModel)
-	assert.Equal(t, 1, rm.cursor)
+	assert.Contains(t, rm.list.Title, "0/2 selected")
+}
+
+func TestRepoModel_filteredToggleMutatesUnderlyingState(t *testing.T) {
+	m := newRepoTestModel(
+		workspace.RepoCandidate{Name: "retail-mono", Selected: false},
+		workspace.RepoCandidate{Name: "kiab", Selected: false},
+	)
+	// Apply a filter (SetFilterText is the synchronous path; keystroke
+	// filtering resolves through async tea.Cmds a unit test can't pump),
+	// then toggle the surviving row.
+	m.list.SetFilterText("kiab")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	rm := next.(*repoModel)
+	assert.True(t, rm.states[1].checked, "toggling the filtered row checks kiab")
+	assert.False(t, rm.states[0].checked, "retail-mono untouched")
+}
+
+func TestRepoModel_selectAllRespectsFilter(t *testing.T) {
+	m := newRepoTestModel(
+		workspace.RepoCandidate{Name: "retail-mono"},
+		workspace.RepoCandidate{Name: "retail-bruno"},
+		workspace.RepoCandidate{Name: "kiab"},
+	)
+	m.list.SetFilterText("retail")
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	rm := next.(*repoModel)
+	assert.Equal(t, 2, rm.countChecked(), "a selects only the filtered subset")
+	assert.False(t, rm.states[2].checked, "kiab stays unchecked")
 }
 
 func TestRepoModel_view(t *testing.T) {
 	m := newRepoTestModel(
-		workspace.RepoCandidate{Name: "alpha", Selected: true},
-		workspace.RepoCandidate{Name: "beta", Selected: false},
+		workspace.RepoCandidate{Name: "alpha", Selected: true, Source: "default_repos"},
+		workspace.RepoCandidate{Name: "beta", Selected: false, Source: "other clone"},
 	)
 	v := m.View()
 	assert.Contains(t, v, "alpha")
 	assert.Contains(t, v, "beta")
 	assert.Contains(t, v, "[x]")
 	assert.Contains(t, v, "[ ]")
-	assert.Contains(t, v, "space toggle")
+	assert.Contains(t, v, "default_repos")
+	assert.Contains(t, v, "selected")
 
 	// View returns empty after confirmation/cancellation so the picker doesn't
 	// leave its UI on screen.
@@ -142,12 +167,4 @@ func TestPickRepos_emptyCandidatesError(t *testing.T) {
 func TestRepoModel_init(t *testing.T) {
 	m := newRepoTestModel(workspace.RepoCandidate{Name: "a"})
 	assert.Nil(t, m.Init())
-}
-
-func TestRepoModel_windowSize(t *testing.T) {
-	m := newRepoTestModel(workspace.RepoCandidate{Name: "a"})
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
-	rm := updated.(*repoModel)
-	assert.Equal(t, 100, rm.width)
-	assert.Equal(t, 40, rm.height)
 }

@@ -14,7 +14,7 @@ internal/
   workspace/                domain: Workspace types + Service{Git,FS,Clock}
   git/                      thin git CLI wrapper
   linear/                   shell-out to `linear` CLI
-  tui/                      bubbletea pickers (workspace, ticket, ticket-create)
+  tui/                      bubbletea/fzf pickers (workspace, container, repo multi-select, ticket flow, name prompt)
   output/                   --json gating, record printing
   shell/                    bash/zsh/fish init script templates
 ```
