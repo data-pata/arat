@@ -171,16 +171,117 @@ func TestNew_insideProject_repoNotInProjectUsesDefaultBase(t *testing.T) {
 	assert.Len(t, child.Repos, 2)
 }
 
-func TestNew_parentMustBeAProject(t *testing.T) {
+// A task in a task is a sub-issue, so a task workspace is a valid parent and
+// shows up in the tree exactly like a project's child does.
+func TestNew_taskHoldsSubTasks(t *testing.T) {
 	root := setupRoot(t, "repo-a")
 	svc := newSvc(t, root)
 	ctx := t.Context()
 
-	_, err := svc.New(ctx, NewOptions{ShortName: "leaf", Repos: []string{"repo-a"}})
+	parent, err := svc.New(ctx, NewOptions{ShortName: "invoice-pdf", Ticket: "abc-12", Repos: []string{"repo-a"}})
 	require.NoError(t, err)
 
-	_, err = svc.New(ctx, NewOptions{ShortName: "deeper", Repos: []string{"repo-a"}, Parent: "leaf"})
-	assert.ErrorIs(t, err, ErrInvalidInput)
+	child, err := svc.New(ctx, NewOptions{
+		ShortName: "fonts",
+		Ticket:    "abc-18",
+		Repos:     []string{"repo-a"},
+		Parent:    "abc-12--invoice-pdf",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "abc-12--invoice-pdf/abc-18--fonts", child.Ref)
+	assert.Equal(t, "abc-12--invoice-pdf", child.Parent)
+	assert.Equal(t, filepath.Join(parent.Path, "abc-18--fonts"), child.Path)
+
+	// The parent still reports its own worktree, and now also its child.
+	got, err := svc.Get(ctx, "abc-12--invoice-pdf")
+	require.NoError(t, err)
+	assert.Equal(t, KindTask, got.Kind)
+	require.Len(t, got.Repos, 1)
+	assert.Equal(t, "repo-a", got.Repos[0].Name)
+	require.Len(t, got.Children, 1)
+	assert.Equal(t, "abc-12--invoice-pdf/abc-18--fonts", got.Children[0].Ref)
+
+	// A sub-issue of a sub-issue is fine too.
+	grand, err := svc.New(ctx, NewOptions{
+		ShortName: "kerning",
+		Repos:     []string{"repo-a"},
+		Parent:    "abc-12--invoice-pdf/abc-18--fonts",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "abc-12--invoice-pdf/abc-18--fonts/kerning", grand.Ref)
+}
+
+// Linear has no project inside a project or inside an issue, so neither does
+// arat.
+func TestNew_projectCannotBeNested(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	_, err := svc.New(ctx, NewOptions{ShortName: "q3-billing", Kind: KindProject})
+	require.NoError(t, err)
+	_, err = svc.New(ctx, NewOptions{ShortName: "leaf", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	for _, parent := range []string{"q3-billing", "leaf"} {
+		t.Run(parent, func(t *testing.T) {
+			_, err := svc.New(ctx, NewOptions{ShortName: "nested", Kind: KindProject, Parent: parent})
+			assert.ErrorIs(t, err, ErrInvalidInput)
+			assert.NoDirExists(t, filepath.Join(svc.WorkspacesDir, parent, "nested"))
+		})
+	}
+}
+
+// Inheriting from a task parent is the sub-issue equivalent of stacking on a
+// project's integration branch.
+func TestNew_subTaskInheritsParentBranchWhenAsked(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	parent, err := svc.New(ctx, NewOptions{ShortName: "invoice-pdf", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+
+	wt := filepath.Join(parent.Path, "repo-a")
+	require.NoError(t, os.WriteFile(filepath.Join(wt, "parent-only.txt"), []byte("x"), 0o644))
+	runGit(t, wt, "add", ".")
+	runGit(t, wt, "commit", "-m", "parent work")
+
+	plain, err := svc.New(ctx, NewOptions{ShortName: "plain", Repos: []string{"repo-a"}, Parent: "invoice-pdf"})
+	require.NoError(t, err)
+	assert.NoFileExists(t, filepath.Join(plain.Path, "repo-a", "parent-only.txt"))
+
+	stacked, err := svc.New(ctx, NewOptions{
+		ShortName:             "stacked",
+		Repos:                 []string{"repo-a"},
+		Parent:                "invoice-pdf",
+		InheritParentBranches: true,
+	})
+	require.NoError(t, err)
+	assert.FileExists(t, filepath.Join(stacked.Path, "repo-a", "parent-only.txt"))
+}
+
+// Removing a task that holds sub-issues takes them with it, so it needs the
+// same explicit --recursive a project does.
+func TestRemove_taskWithSubTasksNeedsRecursive(t *testing.T) {
+	root := setupRoot(t, "repo-a")
+	svc := newSvc(t, root)
+	ctx := t.Context()
+
+	parent, err := svc.New(ctx, NewOptions{ShortName: "invoice-pdf", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	_, err = svc.New(ctx, NewOptions{ShortName: "fonts", Repos: []string{"repo-a"}, Parent: "invoice-pdf"})
+	require.NoError(t, err)
+
+	_, err = svc.Remove(ctx, RemoveOptions{Name: "invoice-pdf"})
+	var notEmpty *ErrNotEmpty
+	require.ErrorAs(t, err, &notEmpty)
+	assert.Equal(t, []string{"invoice-pdf/fonts"}, notEmpty.Children)
+	assert.DirExists(t, parent.Path)
+
+	_, err = svc.Remove(ctx, RemoveOptions{Name: "invoice-pdf", Recursive: true})
+	require.NoError(t, err)
+	assert.NoDirExists(t, parent.Path)
 }
 
 func TestNew_unknownParent(t *testing.T) {

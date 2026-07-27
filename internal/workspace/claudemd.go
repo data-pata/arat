@@ -75,14 +75,15 @@ func renderClaudeMD(opts NewOptions, repos []string, branch, ticketURL string, n
 func renderProjectClaudeMD(opts NewOptions, repos []string, branch, date string) string {
 	repoSection := "**Repos**: none — this project groups workspaces only\n"
 	if len(repos) > 0 {
-		repoSection = fmt.Sprintf("**Branch**: `%s`\n**Repos**: %s\n\nWorkspaces created inside this project branch off the latest default branch. Pass `--from-project` to start them from the branch above instead.\n",
+		repoSection = fmt.Sprintf("**Branch**: `%s`\n**Repos**: %s\n\nWorkspaces created inside this project branch off the latest default branch. Pass `--from-parent` to start them from the branch above instead.\n",
 			branch, strings.Join(repos, " "))
 	}
 
 	return fmt.Sprintf(`# %s
 
-Project workspace. Child workspaces live in subdirectories of this one and
-inherit this file as shared context.
+Project workspace, the arat equivalent of a Linear project. Its issues live in
+subdirectories of this one and inherit this file as shared context. Those in
+turn may hold sub-issues, nested the same way.
 
 **Started**: %s
 %s

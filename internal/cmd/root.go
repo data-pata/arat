@@ -116,11 +116,16 @@ func Root(d Deps) *cobra.Command {
 Each workspace is a directory holding git worktrees of one or more repos plus
 a CLAUDE.md and claude_workspace/ scratch dir.
 
-Workspaces nest. A project workspace ("arat new <name> --project") contains
-other workspaces as subdirectories and may itself carry worktrees on a
-long-lived branch. Projects can contain projects. Commands that address a
-single workspace take a ref — the slash-joined path from workspaces_dir, e.g.
-"q3-billing/abc-12--invoice" — or a bare name that is unique across the tree.
+Workspaces nest, following Linear's shape. A project workspace ("arat new
+<name> --project") contains other workspaces as subdirectories and may itself
+carry worktrees on a long-lived branch. Task workspaces nest too: a task
+inside a project is that project's issue, a task inside a task is a sub-issue
+of it. Projects are always top level, because Linear has no project inside a
+project or inside an issue.
+
+Commands that address a single workspace take a ref — the slash-joined path
+from workspaces_dir, e.g. "q3-billing/abc-12--invoice" — or a bare name that
+is unique across the tree.
 
 Commands accept --json where structured output is useful (ls, new, ticket create).
 Stderr is for operational messages; stdout is for results / JSON.

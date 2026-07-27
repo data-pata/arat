@@ -57,20 +57,29 @@ func (s *Service) WorkspaceAt(ctx context.Context, dir string) (*Workspace, erro
 // ProjectAt returns the nearest project containing dir, or nil when dir is
 // not inside any project.
 //
-// Used to infer the parent for `arat new`. Walking past a task workspace to
-// its containing project is deliberate: task workspaces cannot hold children,
-// so creating a workspace while standing in one means "a sibling in the same
-// project", not "a child of this task".
+// Used to infer the parent for `arat new`. Walking past task workspaces to
+// the project above them is deliberate. Tasks *can* hold children (sub-issues
+// nest), but standing in a task is the ordinary state of working in one, so
+// treating that as "make this a sub-issue" would build deep trees by
+// accident. `arat new` from inside a task therefore means "a sibling in the
+// same project"; a sub-issue is asked for explicitly with --in.
+//
+// Because tasks nest, the walk up cannot stop at the immediate parent: a task
+// two levels inside a project has a task as its parent.
 func (s *Service) ProjectAt(ctx context.Context, dir string) (*Workspace, error) {
 	ws, err := s.WorkspaceAt(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
-	if ws.IsProject() {
-		return ws, nil
+	for {
+		if ws.IsProject() {
+			return ws, nil
+		}
+		if ws.Parent == "" {
+			return nil, nil
+		}
+		if ws, err = s.Get(ctx, ws.Parent); err != nil {
+			return nil, err
+		}
 	}
-	if ws.Parent == "" {
-		return nil, nil
-	}
-	return s.Get(ctx, ws.Parent)
 }

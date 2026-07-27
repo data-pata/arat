@@ -284,24 +284,26 @@ func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, 
 		// initiative (a slug), never to an issue, so there is no ticket to
 		// parse out of the directory name.
 		ws.ShortName = name
-		return ws, s.hydrateProject(ctx, &ws, inspect, depth)
+	} else {
+		ws.Ticket, ws.ShortName = ParseName(name, s.TicketRE)
+		if ws.Ticket != "" && s.TicketURL != "" {
+			ws.TicketURL = renderTicketURL(s.TicketURL, ws.Ticket)
+		}
 	}
-
-	ws.Ticket, ws.ShortName = ParseName(name, s.TicketRE)
-	if ws.Ticket != "" && s.TicketURL != "" {
-		ws.TicketURL = renderTicketURL(s.TicketURL, ws.Ticket)
-	}
-	if !inspect {
-		return ws, nil
-	}
-	return ws, s.hydrateTaskRepos(ctx, &ws)
+	return ws, s.hydrateContents(ctx, &ws, inspect, depth)
 }
 
-// hydrateTaskRepos fills ws.Repos for a leaf workspace.
-func (s *Service) hydrateTaskRepos(ctx context.Context, ws *Workspace) error {
-	// Single-repo workspace: the workspace dir itself is a git worktree.
-	// Don't recurse into it (its subdirs aren't separate worktrees).
-	if s.Git.IsWorktree(ctx, ws.Path) {
+// hydrateContents fills ws.Children and, when inspect is set, ws.Repos.
+//
+// The same walk serves projects and tasks: both can hold child workspaces
+// (a task's children are its sub-issues) and both can hold worktrees, so the
+// only thing that separates a subdirectory's two possible roles is the marker
+// file, not the kind of the workspace containing it.
+func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, inspect bool, depth int) error {
+	// Single-repo workspace: the workspace dir itself is a git worktree, so
+	// its subdirs are the repo's own source tree rather than anything arat
+	// put there. Don't classify them.
+	if inspect && s.Git.IsWorktree(ctx, ws.Path) {
 		ws.Repos = append(ws.Repos, s.inspectAt(ctx, "", ws.Path))
 		return nil
 	}
@@ -314,32 +316,14 @@ func (s *Service) hydrateTaskRepos(ctx context.Context, ws *Workspace) error {
 		if !isCandidateSubdir(sub) {
 			continue
 		}
-		repoPath := filepath.Join(ws.Path, sub.Name())
-		if !s.Git.IsWorktree(ctx, repoPath) {
-			continue
-		}
-		ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), repoPath))
-	}
-	return nil
-}
-
-// hydrateProject fills ws.Children (and, when inspect is set, ws.Repos) for a
-// project workspace.
-func (s *Service) hydrateProject(ctx context.Context, ws *Workspace, inspect bool, depth int) error {
-	if depth >= maxDepth {
-		return nil
-	}
-	subs, err := os.ReadDir(ws.Path)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", ws.Path, err)
-	}
-	for _, sub := range subs {
-		if !isCandidateSubdir(sub) {
-			continue
-		}
 		subPath := filepath.Join(ws.Path, sub.Name())
 
 		if hasMeta(subPath) {
+			// Past the depth cap, stop descending but keep walking this
+			// level so the workspace's own repos are still found.
+			if depth >= maxDepth {
+				continue
+			}
 			var modTime time.Time
 			if info, err := sub.Info(); err == nil {
 				modTime = info.ModTime()

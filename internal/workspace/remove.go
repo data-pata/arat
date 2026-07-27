@@ -10,8 +10,8 @@ import (
 	"github.com/data-pata/arat/internal/git"
 )
 
-// ErrNotEmpty means Remove was asked to delete a project that still contains
-// nested workspaces, without RemoveOptions.Recursive.
+// ErrNotEmpty means Remove was asked to delete a workspace that still
+// contains nested workspaces, without RemoveOptions.Recursive.
 //
 // It is deliberately distinct from ErrPrecondition: the precondition errors
 // are about losing *changes* and are cleared with --force, whereas this one
@@ -36,8 +36,8 @@ type RemoveOptions struct {
 	Name         string
 	Force        bool // skip safety checks (dirty/unpushed)
 	KeepBranches bool // do not delete the branches when removing worktrees
-	// Recursive permits removing a project that still contains nested
-	// workspaces. Without it, such a removal is refused: deleting a project
+	// Recursive permits removing a workspace that still contains nested
+	// workspaces. Without it, such a removal is refused: deleting the
 	// directory takes every workspace under it with it, and that is too
 	// much to do on the strength of one name on the command line.
 	Recursive bool
@@ -71,9 +71,9 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 	}
 	full := ws.Path
 
-	// A project's directory contains its children, so removing it removes
+	// A workspace's directory contains its children, so removing it removes
 	// them too. Require that to be stated explicitly. --force is about
-	// losing *committed and uncommitted work*; this is about losing whole
+	// losing *committed and uncommitted work*, this is about losing whole
 	// workspaces, so it deliberately needs its own flag.
 	nested := Descendants(*ws)
 	if len(nested) > 0 && !opts.Recursive {
@@ -84,10 +84,10 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 		return nil, &ErrNotEmpty{Ref: ws.Ref, Children: refs}
 	}
 
-	// Collect the worktrees of the project itself and of every workspace
+	// Collect the worktrees of the workspace itself and of every workspace
 	// below it. Each workspace dir is scanned on its own: a child workspace
-	// directory is not a worktree, so scanning a project picks up only the
-	// project's own worktrees and never double-counts a child's.
+	// directory is not a worktree, so scanning one picks up only its own
+	// worktrees and never double-counts a child's.
 	var worktrees []worktree
 	for _, target := range append([]Workspace{*ws}, nested...) {
 		found, err := s.locateWorktrees(ctx, target.Path)

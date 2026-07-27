@@ -264,8 +264,9 @@ func TestService_ProjectAt(t *testing.T) {
 	svc := projectSvc(t, wsDir, &fakeInspector{})
 	ctx := context.Background()
 
-	// Standing in a task inside a project resolves to the project: tasks
-	// cannot hold children, so new work goes in as a sibling.
+	// Standing in a task inside a project resolves to the project. Tasks can
+	// hold children, but working in one is the ordinary case, so plain
+	// `arat new` there means a sibling rather than a sub-issue.
 	got, err := svc.ProjectAt(ctx, invoice)
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -281,6 +282,79 @@ func TestService_ProjectAt(t *testing.T) {
 	got, err = svc.ProjectAt(ctx, solo)
 	require.NoError(t, err)
 	assert.Nil(t, got)
+}
+
+// Since tasks nest, the walk up from a sub-issue passes through another task
+// before reaching the project. Stopping at the immediate parent would return
+// a task as if it were the project.
+func TestService_ProjectAt_walksPastNestedTasks(t *testing.T) {
+	wsDir := t.TempDir()
+	proj := filepath.Join(wsDir, "q3-billing")
+	mkProject(t, proj)
+	invoice := filepath.Join(proj, "abc-12--invoice")
+	mkTask(t, invoice)
+	fonts := filepath.Join(invoice, "abc-18--fonts")
+	mkTask(t, fonts)
+	kerning := filepath.Join(fonts, "abc-19--kerning")
+	mkTask(t, kerning)
+
+	svc := projectSvc(t, wsDir, &fakeInspector{})
+	ctx := context.Background()
+
+	got, err := svc.ProjectAt(ctx, kerning)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "q3-billing", got.Ref)
+
+	// The same chain outside any project bottoms out at nil rather than
+	// returning the top-level task.
+	solo := filepath.Join(wsDir, "solo")
+	mkTask(t, solo)
+	sub := filepath.Join(solo, "sub")
+	mkTask(t, sub)
+
+	got, err = svc.ProjectAt(ctx, sub)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+// A task workspace hydrates its sub-issues the same way a project hydrates
+// its issues, at every depth and with its own worktrees intact.
+func TestService_List_nestedTasks(t *testing.T) {
+	wsDir := t.TempDir()
+	invoice := filepath.Join(wsDir, "abc-12--invoice")
+	mkTask(t, invoice)
+	require.NoError(t, os.MkdirAll(filepath.Join(invoice, "core-api"), 0o755))
+	fonts := filepath.Join(invoice, "abc-18--fonts")
+	mkTask(t, fonts)
+	kerning := filepath.Join(fonts, "abc-19--kerning")
+	mkTask(t, kerning)
+
+	svc := projectSvc(t, wsDir, &fakeInspector{worktrees: map[string]bool{
+		filepath.Join(invoice, "core-api"): true,
+	}})
+	ctx := context.Background()
+
+	items, err := svc.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+
+	top := items[0]
+	assert.Equal(t, KindTask, top.Kind)
+	assert.Equal(t, "abc-12", top.Ticket)
+	require.Len(t, top.Repos, 1, "the task's own worktree survives having children")
+	assert.Equal(t, "core-api", top.Repos[0].Name)
+
+	require.Len(t, top.Children, 1)
+	assert.Equal(t, "abc-12--invoice/abc-18--fonts", top.Children[0].Ref)
+	require.Len(t, top.Children[0].Children, 1)
+	assert.Equal(t, "abc-12--invoice/abc-18--fonts/abc-19--kerning", top.Children[0].Children[0].Ref)
+
+	// Flatten and ref lookup reach every depth.
+	assert.Len(t, Flatten(items), 3)
+	got, err := svc.Get(ctx, "abc-19--kerning")
+	require.NoError(t, err)
+	assert.Equal(t, "abc-12--invoice/abc-18--fonts/abc-19--kerning", got.Ref)
 }
 
 func TestService_LinkLinear(t *testing.T) {

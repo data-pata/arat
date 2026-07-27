@@ -25,7 +25,7 @@ func newNewCmd(s *state) *cobra.Command {
 		codeWorkspace        bool
 		projectMode          bool
 		in                   string
-		fromProject          bool
+		fromParent           bool
 	)
 
 	c := &cobra.Command{
@@ -36,24 +36,28 @@ func newNewCmd(s *state) *cobra.Command {
 By default, branches off origin/HEAD on each repo's canonical clone. The new
 branch is named "<branch_prefix>--<short>" or "<branch_prefix>--<short>--<ticket>".
 
-Projects and nesting:
-  --project       create a container workspace instead of a leaf. It holds
-                  other workspaces as subdirectories and gets no worktrees
-                  unless --repos is given. Projects can contain projects. A
-                  project attaches to a Linear project or initiative via
-                  "arat project link", never to an issue.
-  --in <ref>      create this workspace inside the named project.
-  --from-project  branch off the containing project's own branches.
+Projects and nesting, mirroring Linear:
+  --project      create a container workspace instead of a leaf. It holds
+                 other workspaces as subdirectories and gets no worktrees
+                 unless --repos is given. A project attaches to a Linear
+                 project or initiative via "arat project link", never to an
+                 issue. Projects always live at the top level: Linear has no
+                 project inside a project or inside an issue.
+  --in <ref>     create this workspace inside the named workspace. A task in
+                 a project is that project's issue; a task in a task is a
+                 sub-issue of it. Pass "." for the workspace you are in.
+  --from-parent  branch off the containing workspace's own branches.
 
 Without --in, the parent is inferred from cwd: running this from anywhere
-inside a project creates the new workspace in that project (a task workspace
-cannot hold children, so standing in one means "a sibling in the same
-project"). Outside any project, the workspace is created at the top level.
+inside a project creates the new workspace in that project. Standing in a
+task means "a sibling in the same project", not "a sub-issue of this task" —
+working in a task is the ordinary case, so nesting there is asked for
+explicitly with "--in .". Outside any project, the workspace is top level.
 
-Nesting alone does not change where the worktrees start. A workspace created
-inside a project still branches off the latest default branch. Pass
---from-project to branch off the project's own branch for every repo it
-carries a worktree for; repos it does not carry keep the default base.
+Nesting alone does not change where the worktrees start. A nested workspace
+still branches off the latest default branch. Pass --from-parent to branch
+off the parent's own branch for every repo it carries a worktree for; repos
+it does not carry keep the default base.
 
 Ticket mode (one of, mutually exclusive):
   --ticket <id>        attach an existing ticket (e.g. abc-123)
@@ -79,7 +83,8 @@ default_repos and auto_repos_glob.
   arat new q3-billing --project
   arat new q3-billing --project --repos core-mono
   arat new invoice-pdf --ticket abc-12 --in q3-billing
-  arat new invoice-pdf --ticket abc-12 --in q3-billing --from-project`,
+  arat new pdf-fonts --ticket abc-18 --in q3-billing/abc-12--invoice-pdf
+  arat new pdf-fonts --ticket abc-18 --in . --from-parent`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			short := args[0]
@@ -89,11 +94,17 @@ default_repos and auto_repos_glob.
 			if projectMode && (ticket != "" || newTicket != "") {
 				return &exitErr{code: ExitUsage, err: errors.New("--project cannot take a ticket: a project links to a Linear project or initiative via `arat project link`, not to an issue")}
 			}
+			if projectMode && in != "" {
+				return &exitErr{code: ExitUsage, err: errors.New("--project cannot be combined with --in: projects live at the top level and hold workspaces, not the other way round")}
+			}
+			if projectMode && fromParent {
+				return &exitErr{code: ExitUsage, err: errors.New("--project cannot be combined with --from-parent: a top-level project has no parent to branch off")}
+			}
 			// Both pick the commit the new worktrees branch off, from
 			// different workspaces, so honouring both would mean silently
 			// dropping one of them.
-			if fromProject && fromCurrent {
-				return &exitErr{code: ExitUsage, err: errors.New("--from-project and --from-current are mutually exclusive: they name different branches to start from")}
+			if fromParent && fromCurrent {
+				return &exitErr{code: ExitUsage, err: errors.New("--from-parent and --from-current are mutually exclusive: they name different branches to start from")}
 			}
 
 			cfg, err := s.loadConfig()
@@ -102,14 +113,14 @@ default_repos and auto_repos_glob.
 			}
 			svc := s.deps.NewService(cfg)
 
-			parent, err := resolveNewParent(cmd.Context(), svc, s.deps.Cwd, in)
+			parent, err := resolveNewParent(cmd.Context(), svc, s.deps.Cwd, in, projectMode)
 			if err != nil {
 				return &exitErr{code: ExitUsage, err: err}
 			}
 			// Fail here rather than in the domain layer so the message can
 			// name the flags that would fix it.
-			if fromProject && parent == "" {
-				return &exitErr{code: ExitUsage, err: errors.New("--from-project: not inside a project — pass --in <project-ref> or run from within one")}
+			if fromParent && parent == "" {
+				return &exitErr{code: ExitUsage, err: errors.New("--from-parent: the new workspace has no parent — pass --in <ref> (or --in . for the workspace you are in)")}
 			}
 
 			// Interactive repo flow: when --repos wasn't given AND we have a
@@ -181,7 +192,7 @@ default_repos and auto_repos_glob.
 				Ticket:                strings.ToLower(ticket),
 				Repos:                 repos,
 				Parent:                parent,
-				InheritParentBranches: fromProject,
+				InheritParentBranches: fromParent,
 				GenerateCodeWorkspace: codeWorkspace,
 			}
 			if projectMode {
@@ -257,8 +268,8 @@ default_repos and auto_repos_glob.
 	c.Flags().StringVar(&carrySession, "carry-session", "", "Claude Code session id (e.g. 2bba4a38-93e1-...) to move into the new workspace's project dir so /resume finds it after cd")
 	c.Flags().BoolVar(&codeWorkspace, "code-workspace", false, "generate a .code-workspace file (also enabled by config generate_code_workspace)")
 	c.Flags().BoolVar(&projectMode, "project", false, "create a project workspace: a container for other workspaces, with no worktrees unless --repos is given")
-	c.Flags().StringVar(&in, "in", "", "ref of the project to create this workspace inside (default: the project containing cwd, if any)")
-	c.Flags().BoolVar(&fromProject, "from-project", false, "branch new worktrees off the containing project's own branches instead of the default base")
+	c.Flags().StringVar(&in, "in", "", "ref of the workspace to create this one inside, or \".\" for the workspace containing cwd (default: the project containing cwd, if any)")
+	c.Flags().BoolVar(&fromParent, "from-parent", false, "branch new worktrees off the containing workspace's own branches instead of the default base")
 	return c
 }
 
@@ -279,25 +290,48 @@ func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (stri
 	return parent, nil
 }
 
-// resolveNewParent decides which project a new workspace is created inside.
+// resolveNewParent decides which workspace a new one is created inside.
 //
-// An explicit --in always wins. Otherwise the parent is inferred from cwd:
-// standing anywhere inside a project (including inside one of its workspaces
-// or worktrees) creates the new workspace in that project. Outside any
-// project, the workspace is created at the top level, as it always was.
+// An explicit --in always wins, and names any workspace: a task inside a
+// project is that project's issue, a task inside a task is a sub-issue. The
+// special value "." means the workspace containing cwd, which is how you ask
+// for a sub-issue of the task you are standing in.
+//
+// Without --in the parent is inferred from cwd, and inference deliberately
+// resolves to the nearest *project* rather than the nearest workspace. See
+// Service.ProjectAt: standing in a task is the ordinary state of working in
+// one, so it means "a sibling", not "a child".
 //
 // Inference failures are not errors — being outside workspaces_dir entirely
 // is the normal case for a top-level `arat new`.
-func resolveNewParent(ctx context.Context, svc Service, cwdFn func() (string, error), in string) (string, error) {
+//
+// projectMode skips inference altogether: a project is always top level, so
+// running `arat new x --project` from inside a project must not try to nest
+// it and then fail.
+func resolveNewParent(ctx context.Context, svc Service, cwdFn func() (string, error), in string, projectMode bool) (string, error) {
+	if projectMode {
+		return "", nil
+	}
+	if in == "." {
+		if cwdFn == nil {
+			return "", errors.New("--in .: cwd resolver not configured")
+		}
+		cwd, err := cwdFn()
+		if err != nil {
+			return "", fmt.Errorf("--in .: %w", err)
+		}
+		ws, err := svc.WorkspaceAt(ctx, cwd)
+		if err != nil {
+			return "", fmt.Errorf("--in .: %w", err)
+		}
+		return ws.Ref, nil
+	}
 	if in != "" {
-		project, err := svc.Get(ctx, in)
+		parent, err := svc.Get(ctx, in)
 		if err != nil {
 			return "", fmt.Errorf("--in %s: %w", in, err)
 		}
-		if !project.IsProject() {
-			return "", fmt.Errorf("--in %s: %s is a task workspace, not a project", in, project.Ref)
-		}
-		return project.Ref, nil
+		return parent.Ref, nil
 	}
 	if cwdFn == nil {
 		return "", nil

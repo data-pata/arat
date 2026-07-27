@@ -37,8 +37,14 @@ type NewOptions struct {
 	// opt-in rather than the default.
 	Kind Kind
 
-	// Parent is the ref of the project to create this workspace inside
-	// ("q3-billing", "q3-billing/dunning"). Empty creates at the top level.
+	// Parent is the ref of the workspace to create this one inside
+	// ("q3-billing", "q3-billing/abc-12--invoice"). Empty creates at the top
+	// level.
+	//
+	// Any workspace can be a parent: a task nested in a project is that
+	// project's issue, and a task nested in a task is a sub-issue of it.
+	// Projects are the exception — see validateNew — because Linear has no
+	// project-inside-a-project or project-inside-an-issue.
 	//
 	// Nesting on its own says nothing about which commit the worktrees
 	// branch off: a nested workspace still starts from Base (the latest
@@ -46,14 +52,14 @@ type NewOptions struct {
 	Parent string
 
 	// InheritParentBranches makes the new workspace branch off the parent
-	// project's own branch for every repo the parent carries a worktree
+	// workspace's own branch for every repo the parent carries a worktree
 	// for, instead of Base. Repos the parent does not carry still use Base,
 	// and an explicit BaseByRepo entry wins over the inherited value.
 	//
 	// This is opt-in rather than implied by Parent. Grouping work under a
-	// project is common, whereas wanting that work to start from the
-	// project's in-progress branch instead of the latest default branch is
-	// a specific choice, and doing it silently would strand a workspace on
+	// parent is common, whereas wanting that work to start from the
+	// parent's in-progress branch instead of the latest default branch is a
+	// specific choice, and doing it silently would strand a workspace on
 	// stale commits the user never asked to build on.
 	InheritParentBranches bool
 
@@ -241,16 +247,13 @@ func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, r
 	if err != nil {
 		return "", "", nil, err
 	}
-	if !parent.IsProject() {
-		return "", "", nil, fmt.Errorf("%w: %s is a task workspace, not a project — only projects can contain workspaces", ErrInvalidInput, parent.Ref)
-	}
 	if !opts.InheritParentBranches {
 		return parent.Path, parent.Ref, opts.BaseByRepo, nil
 	}
 
-	// Stack on the project's integration branch per repo. Repos the project
-	// has no worktree for are absent here and so fall back to Base, and an
-	// explicit override still wins.
+	// Stack on the parent's branch per repo. Repos the parent has no
+	// worktree for are absent here and so fall back to Base, and an explicit
+	// override still wins.
 	merged := make(map[string]string, len(parent.Repos)+len(opts.BaseByRepo))
 	for _, r := range parent.Repos {
 		if r.Branch != "" {
@@ -298,6 +301,14 @@ func (s *Service) validateNew(opts NewOptions) error {
 	}
 	if k := kindOrTask(opts.Kind); k != KindTask && k != KindProject {
 		return fmt.Errorf("%w: kind %q must be %q or %q", ErrInvalidInput, opts.Kind, KindTask, KindProject)
+	}
+	// Projects are top-level only. arat's tree mirrors Linear's containment
+	// rules, and Linear has neither a project inside a project nor a project
+	// inside an issue: a project holds issues, and an issue holds sub-issues.
+	// Allowing a nested project would model a shape Linear cannot represent,
+	// so a linked workspace tree could never round-trip.
+	if opts.Kind == KindProject && opts.Parent != "" {
+		return fmt.Errorf("%w: a project cannot be nested inside %s — projects live at the top level and hold workspaces, not the other way round", ErrInvalidInput, opts.Parent)
 	}
 	if opts.Ticket != "" {
 		if opts.Kind == KindProject {

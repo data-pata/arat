@@ -110,17 +110,21 @@ when a project still has nested workspaces and --recursive was not given.
 	}
 	c.Flags().BoolVarP(&force, "force", "f", false, "remove even if dirty or unpushed")
 	c.Flags().BoolVar(&keepBranches, "keep-branches", false, "do not delete the branches when removing worktrees")
-	c.Flags().BoolVar(&recursive, "recursive", false, "also remove the workspaces nested inside a project")
+	c.Flags().BoolVar(&recursive, "recursive", false, "also remove the workspaces nested inside this one")
 	return c
 }
 
-// rmPrompt is the picker-mode confirmation. For a project it spells out how
-// many workspaces go with it, because the directory name alone does not
-// convey that removing it removes everything underneath.
+// rmPrompt is the picker-mode confirmation. When the workspace holds others
+// it spells out how many go with it, because the directory name alone does
+// not convey that removing it removes everything underneath.
 func rmPrompt(ws workspace.Workspace) string {
 	if n := len(workspace.Descendants(ws)); n > 0 {
-		return fmt.Sprintf("Remove project %q and the %d %s nested in it? [y/N]: ",
-			ws.Ref, n, pluralize(n, "workspace", "workspaces"))
+		kind := "workspace"
+		if ws.IsProject() {
+			kind = "project"
+		}
+		return fmt.Sprintf("Remove %s %q and the %d %s nested in it? [y/N]: ",
+			kind, ws.Ref, n, pluralize(n, "workspace", "workspaces"))
 	}
 	return fmt.Sprintf("Remove workspace %q? [y/N]: ", ws.Ref)
 }

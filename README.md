@@ -79,8 +79,8 @@ default_team  = "ABC"
 | Command | Purpose |
 | --- | --- |
 | `arat ls [--json]` | List workspaces with `*dirty* *unpushed* *stashes:N*` markers. |
-| `arat new <name> [--project] [--in REF] [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--carry-session ID] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. `--project` creates a container instead of a leaf; `--in` places the new workspace inside a project. `--carry-session` moves a Claude Code session jsonl into the new workspace's project dir so `/resume` finds it after `cd`. |
-| `arat rm [ref] [--force] [--keep-branches] [--recursive]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed unless `--force`, and on a project that still has nested workspaces unless `--recursive`. No ref → interactive picker. |
+| `arat new <name> [--project] [--in REF] [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--carry-session ID] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. `--project` creates a top-level container instead of a leaf; `--in <ref>` places the new workspace inside another one (`--in .` for the workspace at cwd), and `--from-parent` branches off that parent's branches. `--carry-session` moves a Claude Code session jsonl into the new workspace's project dir so `/resume` finds it after `cd`. |
+| `arat rm [ref] [--force] [--keep-branches] [--recursive]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed unless `--force`, and on a workspace that still has others nested inside it unless `--recursive`. No ref → interactive picker. |
 | `arat go [ref]` | Print path to a workspace. With shell wrapper, `cd`s into it. No ref → interactive picker. |
 | `arat project link <ref> (--project \| --initiative) <slug-or-name>` | Link a project workspace to a Linear project or initiative. |
 | `arat project unlink <ref>` | Remove a project workspace's Linear link. |
@@ -104,7 +104,7 @@ to stderr.
 | 1 | generic failure (uncategorized) |
 | 2 | usage error (bad flags / args) |
 | 3 | not found (workspace, ticket, repo) |
-| 4 | precondition failed (dirty / unpushed, pass `--force`; non-empty project, pass `--recursive`) |
+| 4 | precondition failed (dirty / unpushed, pass `--force`. Non-empty workspace, pass `--recursive`) |
 | 5 | conflict (already exists) |
 | 6 | external tool error (git, linear) |
 | 7 | config error |
@@ -125,19 +125,30 @@ to stderr.
 Branch in each worktree: `me--widget-fix--abc-123` (using the configured
 `branch_prefix`).
 
-## Projects
+## Projects and nesting
 
-A **project workspace** is a container: other workspaces live inside it as
+Workspaces form a tree that follows Linear's shape:
+
+| Linear | arat |
+| --- | --- |
+| project | a **project workspace** (`--project`), always at the top level |
+| issue in a project | a task workspace nested in a project |
+| sub-issue of an issue | a task workspace nested in a task |
+
+A project workspace is a container: other workspaces live inside it as
 subdirectories, and it may itself hold worktrees on a long-lived integration
-branch. Projects nest, so a project can contain further projects.
+branch. Task workspaces nest too, arbitrarily deep, which is how sub-issues
+are represented. Projects are the one thing that never nests, because Linear
+has no project inside a project or inside an issue.
 
 ```text
 arat new q3-billing --project --repos core-mono   # container + its own worktree
 cd <workspaces_dir>/q3-billing
-arat new invoice-pdf --ticket abc-12              # nested here, inferred from cwd
-arat new dunning --project                        # a sub-project
-arat new retry --ticket abc-20 --in q3-billing/dunning
-arat new hotfix --ticket abc-21 --from-project    # stack on the project's branch
+arat new invoice-pdf --ticket abc-12              # an issue of the project
+cd abc-12--invoice-pdf
+arat new fonts --ticket abc-18 --in .             # a sub-issue of it
+arat new retry --ticket abc-20 --in q3-billing    # by ref, from anywhere
+arat new hotfix --ticket abc-21 --from-parent     # stack on the parent's branch
 ```
 
 ```
@@ -146,38 +157,43 @@ arat new hotfix --ticket abc-21 --from-project    # stack on the project's branc
     ├── .arat.toml                     # kind = "project"
     ├── CLAUDE.md                      # shared context for everything below
     ├── core-mono/                     # the project's own worktree
-    ├── abc-12--invoice-pdf/           # nested workspace
-    │   └── core-mono/
-    └── dunning/                       # sub-project
-        └── abc-20--retry/
-            └── core-mono/
+    ├── abc-12--invoice-pdf/           # an issue of the project
+    │   ├── core-mono/
+    │   └── abc-18--fonts/             # a sub-issue of that issue
+    │       └── core-mono/
+    └── abc-20--retry/
+        └── core-mono/
 ```
 
 Things worth knowing:
 
 - **Workspaces are addressed by ref.** A ref is the slash-joined path from
-  `workspaces_dir`, e.g. `q3-billing/dunning/abc-20--retry`. A bare directory
-  name also works when it is unique across the tree, so `arat go abc-20--retry`
-  finds it at any depth. An ambiguous bare name is an error listing the full
-  refs rather than a guess.
+  `workspaces_dir`, e.g. `q3-billing/abc-12--invoice-pdf/abc-18--fonts`. A
+  bare directory name also works when it is unique across the tree, so
+  `arat go abc-18--fonts` finds it at any depth. An ambiguous bare name is an
+  error listing the full refs rather than a guess.
+- **`arat new` inside a task gives you a sibling, not a sub-issue.** Standing
+  in a task workspace is the ordinary state of working in one, so cwd
+  inference walks up to the containing project. A sub-issue is asked for
+  explicitly with `--in .` (the workspace you are in) or `--in <ref>`.
 - **Worktrees are opt-in for projects.** `--project` alone creates no
   worktrees, because grouping is the usual reason to make one. Pass `--repos`
   to give the project its own branch.
-- **Nesting does not change the base branch.** A workspace created inside a
-  project still branches off the latest default branch, the same as a
-  top-level one. Pass `--from-project` to stack on the project's own branch
-  for every repo it carries a worktree for. Repos the project does not carry
-  keep the normal base either way.
-- **Removal is explicit.** `arat rm` on a project that still contains
-  workspaces refuses (exit 4) until you pass `--recursive`. `--force` does not
+- **Nesting does not change the base branch.** A nested workspace still
+  branches off the latest default branch, the same as a top-level one. Pass
+  `--from-parent` to stack on the parent's own branch for every repo the
+  parent carries a worktree for. Repos it does not carry keep the normal base
+  either way.
+- **Removal is explicit.** `arat rm` on a workspace that still contains
+  others refuses (exit 4) until you pass `--recursive`. `--force` does not
   substitute for it: `--force` is about discarding *changes*, `--recursive` is
   about discarding whole *workspaces*.
 - **Linear linking is optional, on both projects and their children.** A
   project workspace works with no Linear link at all. When you do link one, it
   attaches to a Linear **project or initiative** (`arat project link`), not to
-  an issue. Note that Linear itself does not nest projects — only initiatives
-  have parents — so arat does not require your nesting to mirror Linear's.
-  A nested arat project may link to either kind, or to nothing.
+  an issue. Initiatives are the only Linear container that nests, and arat has
+  no separate workspace kind for them, so a top-level project workspace may
+  link to either kind, or to nothing.
 
 Workspaces created before projects existed keep working untouched: a directory
 without the `.arat.toml` marker is read as a leaf task workspace.

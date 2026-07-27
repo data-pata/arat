@@ -54,17 +54,71 @@ func TestNew_inFlagSetsParent(t *testing.T) {
 	assert.Equal(t, "q3-billing", svc.newCalls[0].Parent)
 }
 
-func TestNew_inFlagRejectsTaskWorkspace(t *testing.T) {
+// A task is a valid parent now: nesting one inside another is a sub-issue.
+func TestNew_inFlagAcceptsTaskWorkspace(t *testing.T) {
 	svc := &fakeService{
 		getKnown: map[string]*workspace.Workspace{
 			"abc-1--leaf": {Name: "abc-1--leaf", Ref: "abc-1--leaf", Kind: workspace.KindTask},
 		},
+		newResult: &workspace.Workspace{Name: "x", Ref: "abc-1--leaf/x", Path: "/p"},
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--in", "abc-1--leaf"}, nil, svc)
 
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "abc-1--leaf", svc.newCalls[0].Parent)
+}
+
+// "--in ." nests into the workspace at cwd, which is how a sub-issue of the
+// task you are standing in is asked for. Plain `arat new` there would give a
+// sibling instead.
+func TestNew_inDotUsesWorkspaceAtCwd(t *testing.T) {
+	svc := &fakeService{
+		workspaceAtRes: &workspace.Workspace{Name: "abc-1--leaf", Ref: "q3/abc-1--leaf", Kind: workspace.KindTask},
+		newResult:      &workspace.Workspace{Name: "x", Ref: "q3/abc-1--leaf/x", Path: "/p"},
+	}
+	cwdFn := func() (string, error) { return "/ws/q3/abc-1--leaf/repo-a", nil }
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--in", "."}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.Equal(t, "q3/abc-1--leaf", svc.newCalls[0].Parent)
+	assert.Empty(t, svc.projectAtCalls, "--in . must not fall back to project inference")
+}
+
+func TestNew_inDotOutsideAnyWorkspace(t *testing.T) {
+	svc := &fakeService{}
+	cwdFn := func() (string, error) { return "/somewhere/else", nil }
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--in", "."}, nil, svc, depsOpts{cwd: cwdFn})
+
 	assert.Equal(t, ExitUsage, r.exit)
-	assert.Contains(t, r.stderr, "not a project")
+	assert.Contains(t, r.stderr, "--in .")
 	assert.Empty(t, svc.newCalls)
+}
+
+func TestNew_projectFlagRejectsIn(t *testing.T) {
+	svc := &fakeService{}
+	r := run(t, []string{"new", "q4", "--project", "--in", "q3-billing"}, nil, svc)
+
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Contains(t, r.stderr, "--project cannot be combined with --in")
+	assert.Empty(t, svc.newCalls)
+}
+
+// Standing inside a project and creating another project must not try to nest
+// it. Inference is skipped entirely rather than inferring and then failing.
+func TestNew_projectIgnoresCwdInference(t *testing.T) {
+	svc := &fakeService{
+		projectAtRes: &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject},
+		newResult:    &workspace.Workspace{Name: "q4", Ref: "q4", Path: "/p", Kind: workspace.KindProject},
+	}
+	cwdFn := func() (string, error) { return "/ws/q3-billing/somewhere", nil }
+	r := runWithDeps(t, []string{"new", "q4", "--project"}, nil, svc, depsOpts{cwd: cwdFn})
+
+	assert.Equal(t, 0, r.exit, r.stderr)
+	require.Len(t, svc.newCalls, 1)
+	assert.Empty(t, svc.newCalls[0].Parent)
+	assert.Empty(t, svc.projectAtCalls)
 }
 
 func TestNew_inFlagUnknownProject(t *testing.T) {
@@ -116,27 +170,27 @@ func TestNew_nestingAloneDoesNotInheritBranches(t *testing.T) {
 	assert.False(t, svc.newCalls[0].InheritParentBranches)
 }
 
-func TestNew_fromProjectSetsInheritance(t *testing.T) {
+func TestNew_fromParentSetsInheritance(t *testing.T) {
 	svc := &fakeService{
 		getKnown: map[string]*workspace.Workspace{
 			"q3-billing": {Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject},
 		},
 		newResult: &workspace.Workspace{Name: "x", Ref: "q3-billing/x", Path: "/p"},
 	}
-	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing", "--from-project"}, nil, svc)
+	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing", "--from-parent"}, nil, svc)
 
 	assert.Equal(t, 0, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.True(t, svc.newCalls[0].InheritParentBranches)
 }
 
-func TestNew_fromProjectInfersParentFromCwd(t *testing.T) {
+func TestNew_fromParentInfersParentFromCwd(t *testing.T) {
 	svc := &fakeService{
 		projectAtRes: &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing", Kind: workspace.KindProject},
 		newResult:    &workspace.Workspace{Name: "x", Ref: "q3-billing/x", Path: "/p"},
 	}
 	cwdFn := func() (string, error) { return "/ws/q3-billing/somewhere", nil }
-	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-project"}, nil, svc, depsOpts{cwd: cwdFn})
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-parent"}, nil, svc, depsOpts{cwd: cwdFn})
 
 	assert.Equal(t, 0, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
@@ -144,19 +198,19 @@ func TestNew_fromProjectInfersParentFromCwd(t *testing.T) {
 	assert.True(t, svc.newCalls[0].InheritParentBranches)
 }
 
-func TestNew_fromProjectOutsideAnyProjectIsUsageError(t *testing.T) {
+func TestNew_fromParentWithoutAParentIsUsageError(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Ref: "x", Path: "/p"}}
 	cwdFn := func() (string, error) { return "/somewhere/else", nil }
-	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-project"}, nil, svc, depsOpts{cwd: cwdFn})
+	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-parent"}, nil, svc, depsOpts{cwd: cwdFn})
 
 	assert.Equal(t, ExitUsage, r.exit)
-	assert.Contains(t, r.stderr, "not inside a project")
+	assert.Contains(t, r.stderr, "has no parent")
 	assert.Empty(t, svc.newCalls)
 }
 
-func TestNew_fromProjectConflictsWithFromCurrent(t *testing.T) {
+func TestNew_fromParentConflictsWithFromCurrent(t *testing.T) {
 	svc := &fakeService{}
-	r := run(t, []string{"new", "x", "--no-ticket", "--from-project", "--from-current"}, nil, svc)
+	r := run(t, []string{"new", "x", "--no-ticket", "--from-parent", "--from-current"}, nil, svc)
 
 	assert.Equal(t, ExitUsage, r.exit)
 	assert.Contains(t, r.stderr, "mutually exclusive")
