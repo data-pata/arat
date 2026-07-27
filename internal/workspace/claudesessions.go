@@ -157,15 +157,25 @@ func findSessionFile(root, fileName string) (string, error) {
 	return "", fmt.Errorf("%w: session %s", ErrNotFound, fileName)
 }
 
-// siblingEncodedPrefixes returns the encoded prefixes of every workspace dir
-// currently under WorkspacesDir except for the two endpoints of the rename.
+// siblingEncodedPrefixes returns the encoded prefixes of every directory
+// alongside the one being renamed, except for the two endpoints of the rename.
 // Used to avoid mis-matching a sibling workspace whose name shares a prefix
 // with the one being renamed (e.g. `foo` vs `foo-extra`).
+//
+// Siblings are read from the renamed workspace's own parent directory, not
+// from WorkspacesDir. A rename is always in place, so both endpoints share
+// that parent. Scoping to WorkspacesDir instead would, for a workspace nested
+// inside a project, list the *project* as a sibling — and since the project's
+// encoded path is a prefix of its children's, every session dir belonging to
+// the workspace being renamed would be mistaken for the project's and skipped.
+// For a top-level workspace the parent is WorkspacesDir, so this is the same
+// set as before.
 func (s *Service) siblingEncodedPrefixes(oldPath, newPath string) []string {
-	if s.WorkspacesDir == "" {
+	parent := filepath.Dir(oldPath)
+	if parent == "" || parent == "." {
 		return nil
 	}
-	entries, err := os.ReadDir(s.WorkspacesDir)
+	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return nil
 	}
@@ -180,7 +190,7 @@ func (s *Service) siblingEncodedPrefixes(oldPath, newPath string) []string {
 		if name == oldName || name == newName {
 			continue
 		}
-		out = append(out, EncodeCwdAsProjectDir(filepath.Join(s.WorkspacesDir, name)))
+		out = append(out, EncodeCwdAsProjectDir(filepath.Join(parent, name)))
 	}
 	return out
 }

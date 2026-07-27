@@ -37,9 +37,9 @@ type AttachWarning struct {
 // non-fatal warnings (e.g. a worktree that had been moved off the original
 // branch and so couldn't be auto-renamed).
 type AttachResult struct {
-	Workspace        *Workspace
-	Warnings         []AttachWarning
-	SessionWarnings  []SessionMoveWarning
+	Workspace       *Workspace
+	Warnings        []AttachWarning
+	SessionWarnings []SessionMoveWarning
 }
 
 // AttachTicket performs the rename/repair/edit. See type docs above.
@@ -55,9 +55,12 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 	if err != nil {
 		return nil, err
 	}
+	if current.IsProject() {
+		return nil, fmt.Errorf("%w: %s is a project — link it to a Linear project or initiative with `arat project link` instead", ErrInvalidInput, current.Ref)
+	}
 	if current.Ticket != "" {
 		return nil, &ErrPrecondition{Reasons: []string{
-			fmt.Sprintf("workspace %s already has a ticket attached (%s)", current.Name, current.Ticket),
+			fmt.Sprintf("workspace %s already has a ticket attached (%s)", current.Ref, current.Ticket),
 		}}
 	}
 
@@ -65,7 +68,8 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 	oldBranch := BranchName(s.BranchPrefix, short, "")
 	newBranch := BranchName(s.BranchPrefix, short, opts.Ticket)
 	newDirName := DirName(short, opts.Ticket)
-	newPath := filepath.Join(s.WorkspacesDir, newDirName)
+	// Rename in place: a nested workspace stays inside its project.
+	newPath := filepath.Join(filepath.Dir(current.Path), newDirName)
 
 	if newDirName == current.Name {
 		return nil, fmt.Errorf("workspace %s already has the target name", current.Name)
@@ -138,7 +142,7 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 	//    after the workspace dir's been renamed.
 	sessionWarnings := s.MoveSessionsForRename(current.Path, newPath)
 
-	updated, err := s.Get(ctx, newDirName)
+	updated, err := s.Get(ctx, JoinRef(current.Parent, newDirName))
 	if err != nil {
 		return nil, err
 	}

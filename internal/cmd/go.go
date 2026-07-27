@@ -11,9 +11,15 @@ import (
 
 func newGoCmd(s *state) *cobra.Command {
 	c := &cobra.Command{
-		Use:   "go [name]",
+		Use:   "go [ref]",
 		Short: "Print the path of a workspace (for shell-function cd integration)",
 		Long: `Resolve a workspace and print its absolute path on stdout.
+
+A ref is either the full path from workspaces_dir
+("q3-billing/abc-12--invoice") or a bare directory name that is unique across
+the tree ("abc-12--invoice"), so a nested workspace is reachable without
+typing its project. A bare name matching more than one workspace is an error
+listing the full refs.
 
 Pair with the shell integration from "arat init <shell>" so that
 "arat go [name]" actually changes directory in your interactive shell:
@@ -93,17 +99,21 @@ func (s *state) pickWorkspaceInteractive(cmd *cobra.Command, svc Service) (*work
 	if s.deps.PickWorkspace == nil {
 		return nil, &exitErr{code: ExitUsage, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
 	}
-	items, err := svc.ListShallow(cmd.Context())
+	tree, err := svc.ListShallow(cmd.Context())
 	if err != nil {
 		if errors.Is(err, workspace.ErrNoWorkspacesDir) {
 			return nil, &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
 		}
 		return nil, &exitErr{code: ExitExternal, err: err}
 	}
+	// Flatten so nested workspaces are selectable directly. Projects stay in
+	// the list: jumping to a project is how you get to its shared CLAUDE.md
+	// and to the directory new work is created in.
+	items := workspace.Flatten(tree)
 	if len(items) == 0 {
 		return nil, &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
 	}
-	// Most-recently-touched first, name asc as tiebreak. mtime on the
+	// Most-recently-touched first, ref asc as tiebreak. mtime on the
 	// workspace dir is a cheap proxy for "last visited" — it bumps on most
 	// activity (new file at the top level, branch checkout, etc.) without us
 	// having to keep a separate visit log.
@@ -111,7 +121,7 @@ func (s *state) pickWorkspaceInteractive(cmd *cobra.Command, svc Service) (*work
 		if !items[i].Created.Equal(items[j].Created) {
 			return items[i].Created.After(items[j].Created)
 		}
-		return items[i].Name < items[j].Name
+		return items[i].Ref < items[j].Ref
 	})
 	chosen, err := s.deps.PickWorkspace(cmd.Context(), items, s.deps.Stderr)
 	if err != nil {

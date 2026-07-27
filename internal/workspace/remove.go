@@ -2,19 +2,45 @@ package workspace
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/data-pata/arat/internal/git"
 )
+
+// ErrNotEmpty means Remove was asked to delete a project that still contains
+// nested workspaces, without RemoveOptions.Recursive.
+//
+// It is deliberately distinct from ErrPrecondition: the precondition errors
+// are about losing *changes* and are cleared with --force, whereas this one
+// is about losing whole *workspaces* and is cleared with --recursive. Telling
+// the user to reach for --force here would be actively wrong.
+type ErrNotEmpty struct {
+	Ref      string
+	Children []string
+}
+
+func (e *ErrNotEmpty) Error() string {
+	noun := "workspaces"
+	if len(e.Children) == 1 {
+		noun = "workspace"
+	}
+	return fmt.Sprintf("%s contains %d nested %s: %s",
+		e.Ref, len(e.Children), noun, strings.Join(e.Children, ", "))
+}
 
 // RemoveOptions controls Service.Remove.
 type RemoveOptions struct {
 	Name         string
 	Force        bool // skip safety checks (dirty/unpushed)
 	KeepBranches bool // do not delete the branches when removing worktrees
+	// Recursive permits removing a project that still contains nested
+	// workspaces. Without it, such a removal is refused: deleting a project
+	// directory takes every workspace under it with it, and that is too
+	// much to do on the strength of one name on the command line.
+	Recursive bool
 }
 
 // RemoveResult is the outcome of Service.Remove.
@@ -39,21 +65,36 @@ type StashedRepo struct {
 // survive worktree removal, so removal proceeds and the result lists the
 // affected worktrees in StashedRepos.
 func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult, error) {
-	full := filepath.Join(s.WorkspacesDir, opts.Name)
-	info, err := os.Stat(full)
+	ws, err := s.Get(ctx, opts.Name)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, opts.Name)
-		}
 		return nil, err
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("%w: %s is not a directory", ErrNotFound, opts.Name)
+	full := ws.Path
+
+	// A project's directory contains its children, so removing it removes
+	// them too. Require that to be stated explicitly. --force is about
+	// losing *committed and uncommitted work*; this is about losing whole
+	// workspaces, so it deliberately needs its own flag.
+	nested := Descendants(*ws)
+	if len(nested) > 0 && !opts.Recursive {
+		refs := make([]string, 0, len(nested))
+		for _, c := range nested {
+			refs = append(refs, c.Ref)
+		}
+		return nil, &ErrNotEmpty{Ref: ws.Ref, Children: refs}
 	}
 
-	worktrees, err := s.locateWorktrees(ctx, full)
-	if err != nil {
-		return nil, err
+	// Collect the worktrees of the project itself and of every workspace
+	// below it. Each workspace dir is scanned on its own: a child workspace
+	// directory is not a worktree, so scanning a project picks up only the
+	// project's own worktrees and never double-counts a child's.
+	var worktrees []worktree
+	for _, target := range append([]Workspace{*ws}, nested...) {
+		found, err := s.locateWorktrees(ctx, target.Path)
+		if err != nil {
+			return nil, err
+		}
+		worktrees = append(worktrees, found...)
 	}
 
 	if !opts.Force {

@@ -24,13 +24,13 @@ import (
 func pickWorkspaceFzf(ctx context.Context, fzfPath string, items []workspace.Workspace) (*workspace.Workspace, error) {
 	var in bytes.Buffer
 	for _, ws := range items {
-		in.WriteString(ws.Name)
-		if ws.Ticket != "" {
-			// \t separates name (column 1) from ticket (column 2); the dim
-			// ANSI wraps the ticket so it reads as secondary info. fzf's
-			// --ansi strips the codes for matching but renders them on screen.
+		in.WriteString(refOf(ws))
+		// \t separates the ref (column 1) from secondary info (column 2);
+		// the dim ANSI wraps that column so it reads as secondary. fzf's
+		// --ansi strips the codes for matching but renders them on screen.
+		if note := fzfNote(ws); note != "" {
 			in.WriteString("\t\x1b[2m")
-			in.WriteString(ws.Ticket)
+			in.WriteString(note)
 			in.WriteString("\x1b[0m")
 		}
 		in.WriteByte('\n')
@@ -65,15 +65,38 @@ func pickWorkspaceFzf(ctx context.Context, fzfPath string, items []workspace.Wor
 	if sel == "" {
 		return nil, nil
 	}
-	// Line is "<name>\t<ticket-with-ansi>" or just "<name>".
-	name := sel
+	// Line is "<ref>\t<note-with-ansi>" or just "<ref>".
+	ref := sel
 	if i := strings.IndexByte(sel, '\t'); i >= 0 {
-		name = sel[:i]
+		ref = sel[:i]
 	}
 	for i := range items {
-		if items[i].Name == name {
+		if refOf(items[i]) == ref {
 			return &items[i], nil
 		}
 	}
-	return nil, fmt.Errorf("fzf returned unknown workspace: %q", name)
+	return nil, fmt.Errorf("fzf returned unknown workspace: %q", ref)
+}
+
+// refOf is the identifier shown in the picker and matched back to a
+// workspace. Ref is empty only for a Workspace built by hand (in tests, or by
+// a caller that predates nesting), so fall back to Name.
+func refOf(ws workspace.Workspace) string {
+	if ws.Ref != "" {
+		return ws.Ref
+	}
+	return ws.Name
+}
+
+// fzfNote is the dim secondary column: what distinguishes this entry beyond
+// its ref.
+func fzfNote(ws workspace.Workspace) string {
+	var parts []string
+	if ws.Kind == workspace.KindProject {
+		parts = append(parts, "project")
+	}
+	if ws.Ticket != "" {
+		parts = append(parts, ws.Ticket)
+	}
+	return strings.Join(parts, " ")
 }

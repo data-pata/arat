@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -98,12 +99,31 @@ func NewService(opts ServiceOptions) (*Service, error) {
 	}, nil
 }
 
-// List enumerates workspaces under WorkspacesDir, sorted by name.
+// List enumerates the workspace tree under WorkspacesDir, sorted by name.
 //
-// Each entry is fully hydrated with its repos (subdirs that look like git
-// worktrees) and their inspection. Returns ErrNoWorkspacesDir if WorkspacesDir
-// does not exist.
+// Top-level workspaces are returned; a project workspace carries its nested
+// workspaces on Children (recursively). Each entry is fully hydrated with its
+// repos (subdirs that look like git worktrees) and their inspection.
+//
+// Use Flatten on the result when you want every workspace regardless of
+// depth. Returns ErrNoWorkspacesDir if WorkspacesDir does not exist.
 func (s *Service) List(ctx context.Context) ([]Workspace, error) {
+	return s.list(ctx, true)
+}
+
+// ListShallow is List without per-repo git inspection: every Repos slice
+// comes back empty. Used by the interactive picker, where full inspection
+// (dirty / unpushed / stash counts on every worktree) would otherwise add a
+// multi-second pause before the picker appears.
+//
+// The tree itself is still walked in full — nesting is derived from the
+// workspace marker file, which costs one stat per directory and no git calls,
+// so the picker can still offer nested workspaces.
+func (s *Service) ListShallow(ctx context.Context) ([]Workspace, error) {
+	return s.list(ctx, false)
+}
+
+func (s *Service) list(ctx context.Context, inspect bool) ([]Workspace, error) {
 	entries, err := os.ReadDir(s.WorkspacesDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -114,15 +134,14 @@ func (s *Service) List(ctx context.Context) ([]Workspace, error) {
 
 	out := make([]Workspace, 0, len(entries))
 	for _, e := range entries {
-		if !e.IsDir() {
+		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		info, err := e.Info()
 		var modTime time.Time
-		if err == nil {
+		if info, err := e.Info(); err == nil {
 			modTime = info.ModTime()
 		}
-		ws, err := s.hydrate(ctx, e.Name(), modTime)
+		ws, err := s.hydrateDir(ctx, "", e.Name(), filepath.Join(s.WorkspacesDir, e.Name()), modTime, inspect, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -132,52 +151,74 @@ func (s *Service) List(ctx context.Context) ([]Workspace, error) {
 	return out, nil
 }
 
-// ListShallow is List without per-repo git inspection. Returns workspaces
-// with their Repos slice empty. Used by the interactive picker, where full
-// inspection (dirty / unpushed / stash counts on every worktree) would
-// otherwise add a multi-second pause before the picker appears.
-func (s *Service) ListShallow(_ context.Context) ([]Workspace, error) {
-	entries, err := os.ReadDir(s.WorkspacesDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%w: %s", ErrNoWorkspacesDir, s.WorkspacesDir)
+// Get returns one workspace, fully hydrated, addressed either by its full ref
+// ("q3-billing/abc-12--invoice") or by a bare directory name that is unique
+// across the tree ("abc-12--invoice").
+//
+// Returns ErrNotFound if nothing matches, or *ErrAmbiguous if a bare name
+// matches more than one workspace.
+func (s *Service) Get(ctx context.Context, ref string) (*Workspace, error) {
+	// Fast path: the ref addresses a directory directly. Covers both
+	// top-level names and full refs without walking the tree.
+	if full, err := s.resolveRefPath(ref); err == nil {
+		if info, statErr := os.Stat(full); statErr == nil {
+			if !info.IsDir() {
+				return nil, fmt.Errorf("%w: %s is not a directory", ErrNotFound, ref)
+			}
+			clean := cleanRef(ref)
+			ws, err := s.hydrateDir(ctx, ParentRef(clean), filepath.Base(full), full, info.ModTime(), true, strings.Count(clean, "/"))
+			if err != nil {
+				return nil, err
+			}
+			return &ws, nil
 		}
-		return nil, fmt.Errorf("read %s: %w", s.WorkspacesDir, err)
 	}
-	out := make([]Workspace, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		var modTime time.Time
-		if info, err := e.Info(); err == nil {
-			modTime = info.ModTime()
-		}
-		out = append(out, s.hydrateShallow(e.Name(), modTime))
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out, nil
-}
 
-// Get returns the workspace with the given dir name, fully hydrated. Returns
-// ErrNotFound if it doesn't exist.
-func (s *Service) Get(ctx context.Context, name string) (*Workspace, error) {
-	full := filepath.Join(s.WorkspacesDir, name)
-	info, err := os.Stat(full)
+	// Slow path: a bare name that lives somewhere below a project. Walk the
+	// tree without git inspection, then fully hydrate whatever matched.
+	items, err := s.list(ctx, false)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("%w: %s", ErrNotFound, name)
+		if errors.Is(err, ErrNoWorkspacesDir) {
+			return nil, fmt.Errorf("%w: %s", ErrNotFound, ref)
 		}
 		return nil, err
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("%w: %s is not a directory", ErrNotFound, name)
+	found, err := Resolve(items, ref)
+	if err != nil {
+		return nil, err
 	}
-	ws, err := s.hydrate(ctx, name, info.ModTime())
+	info, err := os.Stat(found.Path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, ref)
+	}
+	ws, err := s.hydrateDir(ctx, found.Parent, found.Name, found.Path, info.ModTime(), true, strings.Count(found.Ref, "/"))
 	if err != nil {
 		return nil, err
 	}
 	return &ws, nil
+}
+
+// resolveRefPath maps a workspace ref to an absolute path under
+// WorkspacesDir, rejecting refs that would climb out of it.
+func (s *Service) resolveRefPath(ref string) (string, error) {
+	clean := cleanRef(ref)
+	if clean == "" {
+		return "", fmt.Errorf("%w: empty workspace name", ErrNotFound)
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("%w: %q escapes workspaces_dir", ErrInvalidInput, ref)
+	}
+	return filepath.Join(s.WorkspacesDir, filepath.FromSlash(clean)), nil
+}
+
+// cleanRef normalises a user-supplied ref: trimmed, slash-separated, no
+// redundant separators, no leading or trailing slash.
+func cleanRef(ref string) string {
+	clean := path.Clean(strings.TrimSpace(filepath.ToSlash(ref)))
+	if clean == "." || clean == "/" {
+		return ""
+	}
+	return strings.Trim(clean, "/")
 }
 
 // ErrNoWorkspacesDir means the configured workspaces_dir doesn't exist yet.
@@ -203,22 +244,74 @@ func (e *ErrPrecondition) Error() string {
 	return "precondition failed:\n  " + strings.Join(e.Reasons, "\n  ")
 }
 
-func (s *Service) hydrate(ctx context.Context, name string, created time.Time) (Workspace, error) {
-	ws := s.hydrateShallow(name, created)
+// hydrateDir builds one Workspace from a directory, recursing into child
+// workspaces when the directory is a project.
+//
+// Classification of a directory's subdirectories, in order:
+//
+//  1. carries the marker file (MetaFile) -> a child workspace, recursed into
+//  2. is a git worktree                  -> one of this workspace's repos
+//  3. neither                            -> ignored
+//
+// The marker is checked first because it is the only signal that survives
+// both cases arat has to tell apart: a project's own worktree and a nested
+// workspace are both plain subdirectories, and the nested one is the only one
+// arat itself created a marker for.
+//
+// When inspect is false, no git commands run at all: repos are left empty and
+// only the marker file drives recursion.
+func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, created time.Time, inspect bool, depth int) (Workspace, error) {
+	meta, err := readMeta(full)
+	if err != nil {
+		return Workspace{}, err
+	}
 
+	ws := Workspace{
+		Name:    name,
+		Ref:     JoinRef(parentRef, name),
+		Parent:  parentRef,
+		Path:    full,
+		Kind:    KindTask,
+		Created: created,
+	}
+	if meta != nil {
+		ws.Kind = meta.Kind
+		ws.Linear = meta.Linear
+	}
+
+	if ws.IsProject() {
+		// A project is named for itself. It attaches to a Linear project or
+		// initiative (a slug), never to an issue, so there is no ticket to
+		// parse out of the directory name.
+		ws.ShortName = name
+		return ws, s.hydrateProject(ctx, &ws, inspect, depth)
+	}
+
+	ws.Ticket, ws.ShortName = ParseName(name, s.TicketRE)
+	if ws.Ticket != "" && s.TicketURL != "" {
+		ws.TicketURL = renderTicketURL(s.TicketURL, ws.Ticket)
+	}
+	if !inspect {
+		return ws, nil
+	}
+	return ws, s.hydrateTaskRepos(ctx, &ws)
+}
+
+// hydrateTaskRepos fills ws.Repos for a leaf workspace.
+func (s *Service) hydrateTaskRepos(ctx context.Context, ws *Workspace) error {
 	// Single-repo workspace: the workspace dir itself is a git worktree.
 	// Don't recurse into it (its subdirs aren't separate worktrees).
 	if s.Git.IsWorktree(ctx, ws.Path) {
 		ws.Repos = append(ws.Repos, s.inspectAt(ctx, "", ws.Path))
-		return ws, nil
+		return nil
 	}
 
 	subs, err := os.ReadDir(ws.Path)
 	if err != nil {
-		return ws, fmt.Errorf("read %s: %w", ws.Path, err)
+		return fmt.Errorf("read %s: %w", ws.Path, err)
 	}
 	for _, sub := range subs {
-		if !sub.IsDir() || strings.HasPrefix(sub.Name(), ".") || sub.Name() == "claude_workspace" {
+		if !isCandidateSubdir(sub) {
 			continue
 		}
 		repoPath := filepath.Join(ws.Path, sub.Name())
@@ -227,27 +320,51 @@ func (s *Service) hydrate(ctx context.Context, name string, created time.Time) (
 		}
 		ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), repoPath))
 	}
-	return ws, nil
+	return nil
 }
 
-// hydrateShallow fills in everything that can be derived from the workspace
-// dir name alone — no git invocations, no per-repo inspection. Used by the
-// picker, which only needs name + ticket and wants sub-second load even when
-// the user has many workspaces with many repos.
-func (s *Service) hydrateShallow(name string, created time.Time) Workspace {
-	full := filepath.Join(s.WorkspacesDir, name)
-	ticket, short := ParseName(name, s.TicketRE)
-	ws := Workspace{
-		Name:      name,
-		Path:      full,
-		Ticket:    ticket,
-		ShortName: short,
-		Created:   created,
+// hydrateProject fills ws.Children (and, when inspect is set, ws.Repos) for a
+// project workspace.
+func (s *Service) hydrateProject(ctx context.Context, ws *Workspace, inspect bool, depth int) error {
+	if depth >= maxDepth {
+		return nil
 	}
-	if ticket != "" && s.TicketURL != "" {
-		ws.TicketURL = renderTicketURL(s.TicketURL, ticket)
+	subs, err := os.ReadDir(ws.Path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", ws.Path, err)
 	}
-	return ws
+	for _, sub := range subs {
+		if !isCandidateSubdir(sub) {
+			continue
+		}
+		subPath := filepath.Join(ws.Path, sub.Name())
+
+		if hasMeta(subPath) {
+			var modTime time.Time
+			if info, err := sub.Info(); err == nil {
+				modTime = info.ModTime()
+			}
+			child, err := s.hydrateDir(ctx, ws.Ref, sub.Name(), subPath, modTime, inspect, depth+1)
+			if err != nil {
+				return err
+			}
+			ws.Children = append(ws.Children, child)
+			continue
+		}
+
+		if inspect && s.Git.IsWorktree(ctx, subPath) {
+			ws.Repos = append(ws.Repos, s.inspectAt(ctx, sub.Name(), subPath))
+		}
+	}
+	sort.Slice(ws.Children, func(i, j int) bool { return ws.Children[i].Name < ws.Children[j].Name })
+	return nil
+}
+
+// isCandidateSubdir filters the entries of a workspace dir down to those that
+// could be a repo worktree or a child workspace: real directories, not
+// hidden, and not arat's own scratch dir.
+func isCandidateSubdir(e os.DirEntry) bool {
+	return e.IsDir() && !strings.HasPrefix(e.Name(), ".") && e.Name() != claudeWorkspaceDir
 }
 
 // inspectAt builds a RepoStatus for a worktree. If name is empty, it derives
@@ -276,4 +393,3 @@ func renderTicketURL(tmpl, ticket string) string {
 	r := strings.NewReplacer("{TICKET}", ticket, "{TICKET_UPPER}", upper)
 	return r.Replace(tmpl)
 }
-

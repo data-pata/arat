@@ -19,6 +19,10 @@ func renderClaudeMD(opts NewOptions, repos []string, branch, ticketURL string, n
 	date := now.Format("2006-01-02")
 	repoList := strings.Join(repos, " ")
 
+	if opts.Kind == KindProject {
+		return renderProjectClaudeMD(opts, repos, branch, date)
+	}
+
 	carry := ""
 	if opts.CarryFrom != nil && opts.CarryFrom.ParentName != "" {
 		c := opts.CarryFrom
@@ -63,10 +67,43 @@ func renderClaudeMD(opts NewOptions, repos []string, branch, ticketURL string, n
 `, opts.ShortName, carry, opts.ShortName, branch, date, repoList)
 }
 
+// renderProjectClaudeMD is the CLAUDE.md for a project workspace.
+//
+// A project's CLAUDE.md is the shared context every workspace nested under it
+// inherits by sitting below it on disk, so it leads with what the project is
+// rather than with branch mechanics.
+func renderProjectClaudeMD(opts NewOptions, repos []string, branch, date string) string {
+	repoSection := "**Repos**: none — this project groups workspaces only\n"
+	if len(repos) > 0 {
+		repoSection = fmt.Sprintf("**Branch**: `%s`\n**Repos**: %s\n\nWorkspaces created inside this project branch off the branch above rather than origin/HEAD.\n",
+			branch, strings.Join(repos, " "))
+	}
+
+	return fmt.Sprintf(`# %s
+
+Project workspace. Child workspaces live in subdirectories of this one and
+inherit this file as shared context.
+
+**Started**: %s
+%s
+Create work inside it with `+"`arat new <short-name>`"+` from this directory, or
+`+"`arat new <short-name> --in %s`"+` from anywhere. Link it to a Linear project
+or initiative with `+"`arat project link %s`"+`.
+
+## Scope
+
+## Notes
+`, opts.ShortName, date, repoSection, opts.ShortName, opts.ShortName)
+}
+
+// claudeWorkspaceDir is the per-workspace scratch dir arat creates. It is
+// never a repo worktree nor a child workspace, so tree walks skip it by name.
+const claudeWorkspaceDir = "claude_workspace"
+
 // writeClaudeWorkspace creates the claude_workspace/ scratch dir with a
 // .gitignore that ignores everything except itself.
 func writeClaudeWorkspace(workspaceDir string) error {
-	dir := filepath.Join(workspaceDir, "claude_workspace")
+	dir := filepath.Join(workspaceDir, claudeWorkspaceDir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("mkdir claude_workspace: %w", err)
 	}

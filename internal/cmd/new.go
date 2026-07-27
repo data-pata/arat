@@ -23,6 +23,8 @@ func newNewCmd(s *state) *cobra.Command {
 		carryContext         bool
 		carrySession         string
 		codeWorkspace        bool
+		projectMode          bool
+		in                   string
 	)
 
 	c := &cobra.Command{
@@ -32,6 +34,23 @@ func newNewCmd(s *state) *cobra.Command {
 
 By default, branches off origin/HEAD on each repo's canonical clone. The new
 branch is named "<branch_prefix>--<short>" or "<branch_prefix>--<short>--<ticket>".
+
+Projects and nesting:
+  --project     create a container workspace instead of a leaf. It holds other
+                workspaces as subdirectories and gets no worktrees unless
+                --repos is given. Projects can contain projects. A project
+                attaches to a Linear project or initiative via
+                "arat project link", never to an issue.
+  --in <ref>    create this workspace inside the named project.
+
+Without --in, the parent is inferred from cwd: running this from anywhere
+inside a project creates the new workspace in that project (a task workspace
+cannot hold children, so standing in one means "a sibling in the same
+project"). Outside any project, the workspace is created at the top level.
+
+When the parent project has a worktree of its own for a repo, the new
+workspace branches off the project's branch for that repo rather than
+origin/HEAD.
 
 Ticket mode (one of, mutually exclusive):
   --ticket <id>        attach an existing ticket (e.g. abc-123)
@@ -53,12 +72,18 @@ default_repos and auto_repos_glob.
 		Example: `  arat new postal-fix --no-ticket
   arat new postal-fix --ticket abc-123
   arat new postal-fix --new-ticket "Fix postal lookup race"
-  arat new postal-fix --ticket abc-123 --repos core-mono,ui-app`,
+  arat new postal-fix --ticket abc-123 --repos core-mono,ui-app
+  arat new q3-billing --project
+  arat new q3-billing --project --repos core-mono
+  arat new invoice-pdf --ticket abc-12 --in q3-billing`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			short := args[0]
 			if err := validateTicketFlags(ticket, newTicket, newTicketDescription, noTicket); err != nil {
 				return &exitErr{code: ExitUsage, err: err}
+			}
+			if projectMode && (ticket != "" || newTicket != "") {
+				return &exitErr{code: ExitUsage, err: errors.New("--project cannot take a ticket: a project links to a Linear project or initiative via `arat project link`, not to an issue")}
 			}
 
 			cfg, err := s.loadConfig()
@@ -67,10 +92,19 @@ default_repos and auto_repos_glob.
 			}
 			svc := s.deps.NewService(cfg)
 
+			parent, err := resolveNewParent(cmd.Context(), svc, s.deps.Cwd, in)
+			if err != nil {
+				return &exitErr{code: ExitUsage, err: err}
+			}
+
 			// Interactive repo flow: when --repos wasn't given AND we have a
 			// tty, open the multi-select picker pre-populated with the
 			// default+glob set. Non-tty (AI/pipe) keeps the union default.
-			if len(repos) == 0 && isInteractive(s.deps) && s.deps.RepoFlow != nil {
+			//
+			// Projects skip it: they default to no worktrees, so prompting
+			// for a repo set would push the user toward the opposite of the
+			// default. A project that wants worktrees names them explicitly.
+			if len(repos) == 0 && !projectMode && isInteractive(s.deps) && s.deps.RepoFlow != nil {
 				cands, err := svc.ListRepoCandidates()
 				if err != nil {
 					return &exitErr{code: ExitExternal, err: err}
@@ -102,7 +136,8 @@ default_repos and auto_repos_glob.
 			// Interactive ticket flow: when neither --ticket, --new-ticket,
 			// nor --no-ticket was given AND we have a tty, open the chooser.
 			// Otherwise default to no-ticket (preserves AI / pipe behaviour).
-			if ticket == "" && !noTicket && cfg.Linear.Enabled && isInteractive(s.deps) && s.deps.TicketFlow != nil {
+			// Projects never take an issue, so they skip it entirely.
+			if ticket == "" && !noTicket && !projectMode && cfg.Linear.Enabled && isInteractive(s.deps) && s.deps.TicketFlow != nil {
 				lc := s.deps.NewLinear()
 				if err := lc.Available(cmd.Context()); err == nil {
 					res, err := s.deps.TicketFlow(cmd.Context(), lc, cfg.Linear.DefaultTeam, s.deps.Stderr)
@@ -130,20 +165,24 @@ default_repos and auto_repos_glob.
 				ShortName:             short,
 				Ticket:                strings.ToLower(ticket),
 				Repos:                 repos,
+				Parent:                parent,
 				GenerateCodeWorkspace: codeWorkspace,
+			}
+			if projectMode {
+				newOpts.Kind = workspace.KindProject
 			}
 			if s.verbose != nil && *s.verbose {
 				newOpts.Progress = s.deps.Stderr
 			}
 
 			if fromCurrent || carryContext {
-				parent, err := resolveParentWorkspace(svc, cmd.Context(), s.deps.Cwd, cfg.WorkspacesDir)
+				current, err := resolveParentWorkspace(svc, cmd.Context(), s.deps.Cwd)
 				if err != nil {
 					return &exitErr{code: ExitUsage, err: err}
 				}
 				if fromCurrent {
-					m := make(map[string]string, len(parent.Repos))
-					for _, r := range parent.Repos {
+					m := make(map[string]string, len(current.Repos))
+					for _, r := range current.Repos {
 						if r.Branch != "" {
 							m[r.Name] = r.Branch
 						}
@@ -152,10 +191,10 @@ default_repos and auto_repos_glob.
 				}
 				if carryContext {
 					newOpts.CarryFrom = &workspace.CarryContext{
-						ParentName:      parent.Name,
-						ParentShortName: parent.ShortName,
-						ParentTicket:    parent.Ticket,
-						ParentTicketURL: parent.TicketURL,
+						ParentName:      current.Ref,
+						ParentShortName: current.ShortName,
+						ParentTicket:    current.Ticket,
+						ParentTicketURL: current.TicketURL,
 					}
 				}
 			}
@@ -201,12 +240,14 @@ default_repos and auto_repos_glob.
 	c.Flags().BoolVar(&carryContext, "carry-context", false, "seed the new CLAUDE.md with a 'Spun off from <parent>' header")
 	c.Flags().StringVar(&carrySession, "carry-session", "", "Claude Code session id (e.g. 2bba4a38-93e1-...) to move into the new workspace's project dir so /resume finds it after cd")
 	c.Flags().BoolVar(&codeWorkspace, "code-workspace", false, "generate a .code-workspace file (also enabled by config generate_code_workspace)")
+	c.Flags().BoolVar(&projectMode, "project", false, "create a project workspace: a container for other workspaces, with no worktrees unless --repos is given")
+	c.Flags().StringVar(&in, "in", "", "ref of the project to create this workspace inside (default: the project containing cwd, if any)")
 	return c
 }
 
 // resolveParentWorkspace finds the workspace that the current cwd is inside.
 // Used by --from-current and --carry-context.
-func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (string, error), workspacesDir string) (*workspace.Workspace, error) {
+func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (string, error)) (*workspace.Workspace, error) {
 	if cwdFn == nil {
 		return nil, errors.New("--from-current/--carry-context: cwd resolver not configured")
 	}
@@ -214,15 +255,45 @@ func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (stri
 	if err != nil {
 		return nil, err
 	}
-	name, err := workspaceFromCwd(cwd, workspacesDir)
+	parent, err := svc.WorkspaceAt(ctx, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("--from-current/--carry-context: %w", err)
 	}
-	parent, err := svc.Get(ctx, name)
-	if err != nil {
-		return nil, err
-	}
 	return parent, nil
+}
+
+// resolveNewParent decides which project a new workspace is created inside.
+//
+// An explicit --in always wins. Otherwise the parent is inferred from cwd:
+// standing anywhere inside a project (including inside one of its workspaces
+// or worktrees) creates the new workspace in that project. Outside any
+// project, the workspace is created at the top level, as it always was.
+//
+// Inference failures are not errors — being outside workspaces_dir entirely
+// is the normal case for a top-level `arat new`.
+func resolveNewParent(ctx context.Context, svc Service, cwdFn func() (string, error), in string) (string, error) {
+	if in != "" {
+		project, err := svc.Get(ctx, in)
+		if err != nil {
+			return "", fmt.Errorf("--in %s: %w", in, err)
+		}
+		if !project.IsProject() {
+			return "", fmt.Errorf("--in %s: %s is a task workspace, not a project", in, project.Ref)
+		}
+		return project.Ref, nil
+	}
+	if cwdFn == nil {
+		return "", nil
+	}
+	cwd, err := cwdFn()
+	if err != nil {
+		return "", nil
+	}
+	project, err := svc.ProjectAt(ctx, cwd)
+	if err != nil || project == nil {
+		return "", nil
+	}
+	return project.Ref, nil
 }
 
 func mapNewError(err error) error {

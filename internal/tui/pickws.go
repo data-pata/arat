@@ -66,15 +66,29 @@ func pickWorkspaceBubble(ctx context.Context, items []workspace.Workspace, out i
 // wsItem adapts a workspace.Workspace to the list.Item interface.
 type wsItem workspace.Workspace
 
-func (i wsItem) Title() string { return i.Name }
+// Title shows the full ref so two same-named workspaces in different
+// projects stay distinguishable, and so the selected entry reads the same way
+// the user would type it.
+func (i wsItem) Title() string {
+	if i.Ref != "" {
+		return i.Ref
+	}
+	return i.Name
+}
 
 func (i wsItem) Description() string {
-	parts := make([]string, 0, 4)
+	parts := make([]string, 0, 5)
+	if i.Kind == workspace.KindProject {
+		parts = append(parts, dimStyle.Render("project"))
+	}
 	if i.Ticket != "" {
 		parts = append(parts, dimStyle.Render(i.Ticket))
 	}
 	if len(i.Repos) > 0 {
 		parts = append(parts, fmt.Sprintf("%d repo%s", len(i.Repos), pluralS(len(i.Repos))))
+	}
+	if n := len(workspace.Descendants(workspace.Workspace(i))); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d nested", n))
 	}
 	flags := summarizeFlags(workspace.Workspace(i))
 	if flags != "" {
@@ -84,7 +98,7 @@ func (i wsItem) Description() string {
 }
 
 func (i wsItem) FilterValue() string {
-	v := i.Name
+	v := i.Title()
 	if i.Ticket != "" {
 		v += " " + i.Ticket
 	}

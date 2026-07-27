@@ -24,8 +24,28 @@ Convention: packages declare their deps as interfaces, composition lives in
 
 ## Commands (target)
 
-`new`, `ls`, `rm`, `go`, `ticket attach|create`, `note`, `init <shell>`,
-`config init|path`, `version`. Stable exit codes, `--json` where parsing matters.
+`new`, `ls`, `rm`, `go`, `ticket attach|create`, `note`, `repo add`,
+`project link|unlink`, `init <shell>`, `config init|path`, `version`. Stable
+exit codes, `--json` where parsing matters.
+
+## Workspace tree
+
+Workspaces nest. A workspace is either `kind = "task"` (a leaf, with
+worktrees) or `kind = "project"` (a container that may hold child workspaces
+and optionally its own worktrees). Nesting is physical: a child workspace is a
+subdirectory of its parent project.
+
+Each workspace arat creates carries a `.arat.toml` marker at its root. The
+marker is what disambiguates a project's subdirectories: one that carries it is
+a child workspace, one git calls a worktree is a repo, anything else is
+ignored. A directory with no marker reads as a task workspace, so workspaces
+predating projects keep working with no migration.
+
+Workspaces are addressed by **ref** (`Workspace.Ref`): the slash-joined path
+from `workspaces_dir`. `Service.Get` accepts a full ref or a bare name that is
+unique across the tree, returning `*ErrAmbiguous` rather than guessing.
+`Service.List` returns the top level with `Children` populated recursively;
+`workspace.Flatten` gives every workspace regardless of depth.
 
 ## Build phases
 
@@ -37,7 +57,8 @@ Convention: packages declare their deps as interfaces, composition lives in
 6. ✓ interactive ticket flow in `new` + `ticket attach`
 7. ✓ extras (`--from-current`, `--carry-context`, `--code-workspace`, `auto_repos_glob`)
 8. ✓ `repo add` (attach more worktrees to an existing workspace)
-9. migrate `~/.claude/skills/ws-*` to call `arat`         ← current
+9. ✓ project workspaces (nested tree, `--project`/`--in`, `project link`)
+10. migrate `~/.claude/skills/ws-*` to call `arat`        ← current
 
 ## Conventions
 

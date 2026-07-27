@@ -24,6 +24,7 @@ type fakeService struct {
 	listErr          error
 	getResult        *workspace.Workspace
 	getErr           error
+	getKnown         map[string]*workspace.Workspace
 	newResult        *workspace.Workspace
 	newErr           error
 	removeResult     *workspace.RemoveResult
@@ -37,14 +38,26 @@ type fakeService struct {
 	moveSessionSrc   string
 	moveSessionDst   string
 	moveSessionErr   error
+	workspaceAtRes   *workspace.Workspace
+	workspaceAtErr   error
+	projectAtRes     *workspace.Workspace
+	projectAtErr     error
+	linkResult       *workspace.Workspace
+	linkErr          error
+	unlinkResult     *workspace.Workspace
+	unlinkErr        error
 
-	getCalls            []string
-	newCalls            []workspace.NewOptions
-	removeCalls         []workspace.RemoveOptions
-	attachCalls         []workspace.AttachOptions
-	addReposCalls       []workspace.AddReposOptions
-	candidatesCalled    int
-	moveSessionCalls    []moveSessionCall
+	getCalls         []string
+	newCalls         []workspace.NewOptions
+	removeCalls      []workspace.RemoveOptions
+	attachCalls      []workspace.AttachOptions
+	addReposCalls    []workspace.AddReposOptions
+	candidatesCalled int
+	moveSessionCalls []moveSessionCall
+	workspaceAtCalls []string
+	projectAtCalls   []string
+	linkCalls        []workspace.LinkOptions
+	unlinkCalls      []string
 }
 
 type moveSessionCall struct {
@@ -58,8 +71,21 @@ func (f *fakeService) List(_ context.Context) ([]workspace.Workspace, error) {
 func (f *fakeService) ListShallow(_ context.Context) ([]workspace.Workspace, error) {
 	return f.listResult, f.listErr
 }
-func (f *fakeService) Get(_ context.Context, name string) (*workspace.Workspace, error) {
-	f.getCalls = append(f.getCalls, name)
+func (f *fakeService) Get(_ context.Context, ref string) (*workspace.Workspace, error) {
+	f.getCalls = append(f.getCalls, ref)
+	// getKnown, when set, makes the fake ref-sensitive. Commands that use a
+	// successful Get as the test for "is this argument a workspace?" (note)
+	// need a fake that can also say no.
+	if f.getKnown != nil {
+		if ws, ok := f.getKnown[ref]; ok {
+			return ws, nil
+		}
+		return nil, fmt.Errorf("%w: %s", workspace.ErrNotFound, ref)
+	}
+	if f.getResult == nil && f.getErr == nil {
+		// The real service never returns a nil workspace with a nil error.
+		return nil, fmt.Errorf("%w: %s", workspace.ErrNotFound, ref)
+	}
 	return f.getResult, f.getErr
 }
 func (f *fakeService) New(_ context.Context, opts workspace.NewOptions) (*workspace.Workspace, error) {
@@ -85,6 +111,32 @@ func (f *fakeService) ListRepoCandidates() ([]workspace.RepoCandidate, error) {
 func (f *fakeService) MoveSessionFile(_ context.Context, sessionID, target string) (string, string, error) {
 	f.moveSessionCalls = append(f.moveSessionCalls, moveSessionCall{SessionID: sessionID, TargetWS: target})
 	return f.moveSessionSrc, f.moveSessionDst, f.moveSessionErr
+}
+func (f *fakeService) WorkspaceAt(_ context.Context, dir string) (*workspace.Workspace, error) {
+	f.workspaceAtCalls = append(f.workspaceAtCalls, dir)
+	switch {
+	case f.workspaceAtRes != nil || f.workspaceAtErr != nil:
+		return f.workspaceAtRes, f.workspaceAtErr
+	case f.getResult != nil:
+		// Fall back to the Get fixture so tests that only exercise
+		// cwd-inferred lookups don't have to populate two fields.
+		return f.getResult, nil
+	}
+	// An unconfigured fake stands for "cwd is not under workspaces_dir",
+	// which is what the real service reports.
+	return nil, fmt.Errorf("%w: not inside a workspace", workspace.ErrNotFound)
+}
+func (f *fakeService) ProjectAt(_ context.Context, dir string) (*workspace.Workspace, error) {
+	f.projectAtCalls = append(f.projectAtCalls, dir)
+	return f.projectAtRes, f.projectAtErr
+}
+func (f *fakeService) LinkLinear(_ context.Context, opts workspace.LinkOptions) (*workspace.Workspace, error) {
+	f.linkCalls = append(f.linkCalls, opts)
+	return f.linkResult, f.linkErr
+}
+func (f *fakeService) UnlinkLinear(_ context.Context, ref string) (*workspace.Workspace, error) {
+	f.unlinkCalls = append(f.unlinkCalls, ref)
+	return f.unlinkResult, f.unlinkErr
 }
 
 type runResult struct {
@@ -143,16 +195,19 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 
 // fakeLinear implements cmd.LinearClient for handler-level tests.
 type fakeLinear struct {
-	available    bool
-	listResult   []linear.Issue
-	listErr      error
-	createResult linear.IssueResult
-	createErr    error
-	commentErr   error
+	available       bool
+	listResult      []linear.Issue
+	listErr         error
+	createResult    linear.IssueResult
+	createErr       error
+	commentErr      error
+	containerResult []linear.Container
+	containerErr    error
 
-	listCalls    []linear.IssueListOptions
-	createCalls  []linear.IssueCreateOptions
-	commentCalls []linear.CommentAddOptions
+	listCalls      []linear.IssueListOptions
+	createCalls    []linear.IssueCreateOptions
+	commentCalls   []linear.CommentAddOptions
+	containerCalls []string
 }
 
 func (f *fakeLinear) Available(context.Context) error {
@@ -172,6 +227,10 @@ func (f *fakeLinear) IssueCreate(_ context.Context, opts linear.IssueCreateOptio
 func (f *fakeLinear) CommentAdd(_ context.Context, opts linear.CommentAddOptions) error {
 	f.commentCalls = append(f.commentCalls, opts)
 	return f.commentErr
+}
+func (f *fakeLinear) ContainerList(_ context.Context, kind string) ([]linear.Container, error) {
+	f.containerCalls = append(f.containerCalls, kind)
+	return f.containerResult, f.containerErr
 }
 
 // --- ls --------------------------------------------------------------
@@ -343,7 +402,7 @@ func TestNew_carryContext(t *testing.T) {
 
 	svc := &fakeService{
 		newResult: &workspace.Workspace{Name: "abc-2--child", Path: "/p"},
-		getResult: &workspace.Workspace{Name: "abc-1--parent", ShortName: "parent", Ticket: "abc-1", TicketURL: "https://x/ABC-1"},
+		getResult: &workspace.Workspace{Name: "abc-1--parent", Ref: "abc-1--parent", ShortName: "parent", Ticket: "abc-1", TicketURL: "https://x/ABC-1"},
 	}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "abc-1--parent"), nil }
 	r := runWithDeps(t, []string{"new", "child", "--no-ticket", "--carry-context"}, cfg, svc, depsOpts{cwd: cwdFn})
@@ -740,11 +799,11 @@ func TestRm_noStashedReposNoNote(t *testing.T) {
 }
 
 func TestRm_pickerHappy(t *testing.T) {
-	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Path: "/a"}, {Name: "b", Path: "/b"}}}
+	svc := &fakeService{listResult: []workspace.Workspace{{Name: "a", Ref: "a", Path: "/a"}, {Name: "b", Ref: "b", Path: "/b"}}}
 	r := runWithDeps(t, []string{"rm"}, nil, svc, depsOpts{
 		picker: func(_ context.Context, items []workspace.Workspace, _ io.Writer) (*workspace.Workspace, error) {
 			require.Len(t, items, 2)
-			return &workspace.Workspace{Name: "b", Path: "/b"}, nil
+			return &workspace.Workspace{Name: "b", Ref: "b", Path: "/b"}, nil
 		},
 		confirm: func(prompt string) (bool, error) {
 			assert.Contains(t, prompt, `"b"`)
@@ -1002,10 +1061,13 @@ func TestRepoAdd_inferFromCwd(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "myws", "repo-a"), 0o755))
 	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
 
-	svc := &fakeService{addReposResult: &workspace.AddReposResult{
-		Workspace: &workspace.Workspace{Name: "myws"},
-		Added:     []workspace.RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--myws"}},
-	}}
+	svc := &fakeService{
+		addReposResult: &workspace.AddReposResult{
+			Workspace: &workspace.Workspace{Name: "myws"},
+			Added:     []workspace.RepoStatus{{Name: "repo-b", Path: "/p", Branch: "ps--myws"}},
+		},
+		workspaceAtRes: &workspace.Workspace{Name: "myws", Ref: "myws"},
+	}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "myws", "repo-a"), nil }
 	r := runWithDeps(t, []string{"repo", "add", "repo-b"}, cfg, svc, depsOpts{cwd: cwdFn})
 	assert.Equal(t, 0, r.exit, r.stderr)
@@ -1151,7 +1213,10 @@ func TestNote_explicitName_notADir_treatedAsBody(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "wsX", "sub"), 0o755))
 	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
 
-	svc := &fakeService{getResult: &workspace.Workspace{Name: "wsX", Ticket: "abc-1"}}
+	svc := &fakeService{
+		getKnown:       map[string]*workspace.Workspace{"wsX": {Name: "wsX", Ref: "wsX", Ticket: "abc-1"}},
+		workspaceAtRes: &workspace.Workspace{Name: "wsX", Ref: "wsX", Ticket: "abc-1"},
+	}
 	lc := &fakeLinear{available: true}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "wsX", "sub"), nil }
 	r := runWithDeps(t, []string{"note", "definitely", "not", "a", "ws"}, cfg, svc, depsOpts{linear: lc, cwd: cwdFn})
@@ -1166,7 +1231,10 @@ func TestNote_inferFromCwd(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "myws"), 0o755))
 	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
 
-	svc := &fakeService{getResult: &workspace.Workspace{Name: "myws", Ticket: "abc-9"}}
+	svc := &fakeService{
+		getKnown:       map[string]*workspace.Workspace{"myws": {Name: "myws", Ref: "myws", Ticket: "abc-9"}},
+		workspaceAtRes: &workspace.Workspace{Name: "myws", Ref: "myws", Ticket: "abc-9"},
+	}
 	lc := &fakeLinear{available: true}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "myws"), nil }
 	r := runWithDeps(t, []string{"note", "looks", "good"}, cfg, svc, depsOpts{linear: lc, cwd: cwdFn})
@@ -1213,7 +1281,8 @@ func TestNote_explicitName_butNoBody(t *testing.T) {
 	wsDir := filepath.Join(dir, "feat")
 	require.NoError(t, os.MkdirAll(filepath.Join(wsDir, "x"), 0o755))
 	cfg := &config.Config{Root: dir, WorkspacesDir: wsDir, BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: true, DefaultTeam: "ABC"}}
-	r := runWithDeps(t, []string{"note", "x"}, cfg, &fakeService{}, depsOpts{linear: &fakeLinear{available: true}, cwd: failingCwd(t)})
+	svc := &fakeService{getKnown: map[string]*workspace.Workspace{"x": {Name: "x", Ref: "x", Ticket: "abc-1"}}}
+	r := runWithDeps(t, []string{"note", "x"}, cfg, svc, depsOpts{linear: &fakeLinear{available: true}, cwd: failingCwd(t)})
 	assert.Equal(t, ExitUsage, r.exit)
 	assert.Contains(t, r.stderr, "note text is required")
 }

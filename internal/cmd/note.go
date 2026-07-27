@@ -1,10 +1,9 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/data-pata/arat/internal/linear"
@@ -38,7 +37,8 @@ several positional args; they're joined with single spaces.
 				return &exitErr{code: ExitUsage, err: errors.New("linear is disabled in config (set [linear] enabled = true)")}
 			}
 
-			name, body, err := splitNoteArgs(args, s.deps.Cwd, cfg.WorkspacesDir)
+			svc := s.deps.NewService(cfg)
+			ref, body, err := splitNoteArgs(cmd.Context(), args, svc, s.deps.Cwd)
 			if err != nil {
 				return &exitErr{code: ExitUsage, err: err}
 			}
@@ -46,8 +46,7 @@ several positional args; they're joined with single spaces.
 				return &exitErr{code: ExitUsage, err: errors.New("comment body is required")}
 			}
 
-			svc := s.deps.NewService(cfg)
-			ws, err := svc.Get(cmd.Context(), name)
+			ws, err := svc.Get(cmd.Context(), ref)
 			if err != nil {
 				if errors.Is(err, workspace.ErrNotFound) {
 					return &exitErr{code: ExitNotFound, err: err}
@@ -55,7 +54,7 @@ several positional args; they're joined with single spaces.
 				return &exitErr{code: ExitExternal, err: err}
 			}
 			if ws.Ticket == "" {
-				return &exitErr{code: ExitPrecondition, err: fmt.Errorf("workspace %s has no ticket attached; nothing to comment on", ws.Name)}
+				return &exitErr{code: ExitPrecondition, err: fmt.Errorf("workspace %s has no ticket attached; nothing to comment on", ws.Ref)}
 			}
 
 			lc := s.deps.NewLinear()
@@ -75,22 +74,25 @@ several positional args; they're joined with single spaces.
 	return c
 }
 
-// splitNoteArgs decides whether the first positional is a workspace name or
-// part of the body. The rule: if the first arg is the name of a directory
-// directly under workspacesDir, treat it as the workspace name; otherwise
-// infer the workspace from cwd and treat everything as body.
-func splitNoteArgs(args []string, cwd func() (string, error), workspacesDir string) (name, body string, err error) {
+// splitNoteArgs decides whether the first positional is a workspace ref or
+// part of the note body. The rule: if the first arg resolves to a workspace,
+// treat it as the ref; otherwise infer the workspace from cwd and treat every
+// argument as body.
+//
+// Resolution goes through the service rather than a bare directory check so
+// that a nested workspace ("q3-billing/abc-12--invoice") and a bare nested
+// name ("abc-12--invoice") both work.
+func splitNoteArgs(ctx context.Context, args []string, svc Service, cwd func() (string, error)) (ref, body string, err error) {
 	if len(args) == 0 {
 		return "", "", errors.New("note text is required")
 	}
-	first := args[0]
-	if isWorkspaceDir(workspacesDir, first) {
+	if ws, lookupErr := svc.Get(ctx, args[0]); lookupErr == nil {
 		if len(args) < 2 {
 			return "", "", errors.New("note text is required")
 		}
-		return first, strings.Join(args[1:], " "), nil
+		return ws.Ref, strings.Join(args[1:], " "), nil
 	}
-	// no name → infer from cwd
+	// no ref → infer from cwd
 	if cwd == nil {
 		return "", "", errors.New("workspace name not given and cwd resolver not configured")
 	}
@@ -98,37 +100,9 @@ func splitNoteArgs(args []string, cwd func() (string, error), workspacesDir stri
 	if err != nil {
 		return "", "", err
 	}
-	wsName, err := workspaceFromCwd(wd, workspacesDir)
+	ws, err := svc.WorkspaceAt(ctx, wd)
 	if err != nil {
 		return "", "", err
 	}
-	return wsName, strings.Join(args, " "), nil
-}
-
-func isWorkspaceDir(workspacesDir, name string) bool {
-	if workspacesDir == "" || name == "" {
-		return false
-	}
-	info, err := os.Stat(filepath.Join(workspacesDir, name))
-	return err == nil && info.IsDir()
-}
-
-func workspaceFromCwd(cwd, workspacesDir string) (string, error) {
-	abs, err := filepath.Abs(cwd)
-	if err != nil {
-		return "", err
-	}
-	wsAbs, err := filepath.Abs(workspacesDir)
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(wsAbs, abs)
-	if err != nil {
-		return "", err
-	}
-	if rel == "." || strings.HasPrefix(rel, "..") {
-		return "", fmt.Errorf("not inside a workspace (cwd %s is not under workspaces_dir %s)", abs, wsAbs)
-	}
-	parts := strings.SplitN(rel, string(os.PathSeparator), 2)
-	return parts[0], nil
+	return ws.Ref, strings.Join(args, " "), nil
 }

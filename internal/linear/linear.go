@@ -208,6 +208,86 @@ func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue,
 	return out, nil
 }
 
+// Container is a Linear project or initiative — the two things an arat
+// project workspace can be linked to.
+//
+// They are modelled as one type because arat treats them the same way: a
+// named, slug-addressed grouping above the issue level. Linear itself does
+// not nest projects (only initiatives have parentInitiative/subInitiatives),
+// so arat does not tie its own nesting depth to which of the two you pick.
+type Container struct {
+	Kind string `json:"kind"` // "project" or "initiative"
+	ID   string `json:"id"`   // slugId
+	Name string `json:"name"`
+	URL  string `json:"url"`
+}
+
+// Container kinds.
+const (
+	ContainerProject    = "project"
+	ContainerInitiative = "initiative"
+)
+
+// ContainerLister is the read surface `arat project link` consumes.
+type ContainerLister interface {
+	ContainerList(ctx context.Context, kind string) ([]Container, error)
+}
+
+// ContainerList returns every Linear project or initiative the authenticated
+// viewer can see, depending on kind.
+//
+// As with IssueList this goes through `linear api` rather than
+// `linear project list` — the CLI's table output is not designed for
+// parsing, whereas the GraphQL response decodes directly.
+func (l *Linear) ContainerList(ctx context.Context, kind string) ([]Container, error) {
+	var root string
+	switch kind {
+	case ContainerProject:
+		root = "projects"
+	case ContainerInitiative:
+		root = "initiatives"
+	default:
+		return nil, fmt.Errorf("unknown container kind %q (want %q or %q)", kind, ContainerProject, ContainerInitiative)
+	}
+
+	query := fmt.Sprintf(`{
+  %s(first: 250) {
+    nodes { slugId name url }
+  }
+}`, root)
+
+	stdout, stderr, err := l.run(ctx, "linear", "api", query)
+	if err != nil {
+		return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+
+	var resp struct {
+		Data map[string]struct {
+			Nodes []struct {
+				SlugID string `json:"slugId"`
+				Name   string `json:"name"`
+				URL    string `json:"url"`
+			} `json:"nodes"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+	}
+	if len(resp.Errors) > 0 {
+		return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+	}
+
+	nodes := resp.Data[root].Nodes
+	out := make([]Container, 0, len(nodes))
+	for _, n := range nodes {
+		out = append(out, Container{Kind: kind, ID: n.SlugID, Name: n.Name, URL: n.URL})
+	}
+	return out, nil
+}
+
 // CommentAddOptions controls CommentAdd.
 type CommentAddOptions struct {
 	IssueID string // required, e.g. "ABC-123"; lowercased input is upper-cased

@@ -26,6 +26,25 @@ type NewOptions struct {
 	Ticket    string   // optional; lowercase, must match TicketRE if non-empty
 	Repos     []string // explicit repo list; if nil, falls back to default + auto_repos_glob
 
+	// Kind selects a leaf task workspace (KindTask, the zero value) or a
+	// project container (KindProject).
+	//
+	// The two differ in how Repos is defaulted: a task with no explicit
+	// Repos falls back to default_repos + auto_repos_glob, whereas a
+	// project with no explicit Repos gets no worktrees at all. Grouping is
+	// a project's primary job, so materialising a full repo set for one is
+	// opt-in rather than the default.
+	Kind Kind
+
+	// Parent is the ref of the project to create this workspace inside
+	// ("q3-billing", "q3-billing/dunning"). Empty creates at the top level.
+	//
+	// When the parent project has a worktree of its own for a given repo,
+	// the new workspace branches off the parent's branch for that repo
+	// instead of Base, so work inside a project stacks on the project's
+	// integration branch. An explicit BaseByRepo entry still wins.
+	Parent string
+
 	// Phase 7 extras (all optional):
 	//
 	// BaseByRepo overrides the default Base for specific repos when creating
@@ -74,17 +93,22 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 		return nil, err
 	}
 
-	repos, err := s.ResolveRepos(opts.Repos)
+	parentDir, parentRef, baseByRepo, err := s.resolveNewParent(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 
-	dirName := DirName(opts.ShortName, opts.Ticket)
+	repos, err := s.resolveNewRepos(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	dirName := dirNameFor(opts.Kind, opts.ShortName, opts.Ticket)
 	branch := BranchName(s.BranchPrefix, opts.ShortName, opts.Ticket)
-	full := filepath.Join(s.WorkspacesDir, dirName)
+	full := filepath.Join(parentDir, dirName)
 
 	if _, err := os.Stat(full); err == nil {
-		return nil, fmt.Errorf("%w: %s", ErrAlreadyExists, dirName)
+		return nil, fmt.Errorf("%w: %s", ErrAlreadyExists, JoinRef(parentRef, dirName))
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("stat %s: %w", full, err)
 	}
@@ -120,7 +144,7 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 			fetchErr := s.Git.Fetch(gctx, canonical)
 
 			repoBase := base
-			if alt, ok := opts.BaseByRepo[repo]; ok && alt != "" {
+			if alt, ok := baseByRepo[repo]; ok && alt != "" {
 				repoBase = alt
 			}
 
@@ -149,6 +173,13 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 		cleanup()
 		return nil, err
 	}
+	// The marker file is what makes this directory addressable as a
+	// workspace when it sits inside a project, so it is written for every
+	// workspace arat creates, not only for projects.
+	if err := writeMeta(full, Meta{Kind: kindOrTask(opts.Kind)}); err != nil {
+		cleanup()
+		return nil, err
+	}
 	if s.GenerateCodeWorkspace || opts.GenerateCodeWorkspace {
 		if err := writeCodeWorkspace(full, dirName, repos); err != nil {
 			cleanup()
@@ -158,7 +189,10 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 
 	ws := &Workspace{
 		Name:      dirName,
+		Ref:       JoinRef(parentRef, dirName),
+		Parent:    parentRef,
 		Path:      full,
+		Kind:      kindOrTask(opts.Kind),
 		Ticket:    opts.Ticket,
 		ShortName: opts.ShortName,
 		Created:   now,
@@ -176,11 +210,85 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 	return ws, nil
 }
 
+// resolveNewParent locates the directory a new workspace is created in.
+//
+// It returns the parent directory on disk, the parent's ref (empty at top
+// level), and the per-repo base branches inherited from the parent project's
+// own worktrees. Explicit NewOptions.BaseByRepo entries override the
+// inherited ones.
+func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, ref string, baseByRepo map[string]string, err error) {
+	if opts.Parent == "" {
+		return s.WorkspacesDir, "", opts.BaseByRepo, nil
+	}
+
+	parent, err := s.Get(ctx, opts.Parent)
+	if err != nil {
+		return "", "", nil, err
+	}
+	if !parent.IsProject() {
+		return "", "", nil, fmt.Errorf("%w: %s is a task workspace, not a project — only projects can contain workspaces", ErrInvalidInput, parent.Ref)
+	}
+
+	// Inherit the project's branch per repo so a workspace created inside a
+	// project stacks on the project's integration branch rather than
+	// origin/HEAD. Explicit overrides win.
+	merged := make(map[string]string, len(parent.Repos)+len(opts.BaseByRepo))
+	for _, r := range parent.Repos {
+		if r.Branch != "" {
+			merged[r.Name] = r.Branch
+		}
+	}
+	for repo, base := range opts.BaseByRepo {
+		merged[repo] = base
+	}
+	return parent.Path, parent.Ref, merged, nil
+}
+
+// resolveNewRepos picks the repo set to materialise as worktrees.
+//
+// A project defaults to none — it exists to group work, and paying the fetch
+// and worktree cost of a full repo set for a container is rarely what the
+// user wants. A task keeps the established default of default_repos +
+// auto_repos_glob.
+func (s *Service) resolveNewRepos(opts NewOptions) ([]string, error) {
+	if opts.Kind == KindProject {
+		return opts.Repos, nil
+	}
+	return s.ResolveRepos(opts.Repos)
+}
+
+// dirNameFor composes the directory name for a new workspace. Projects are
+// named for themselves; tasks carry their ticket as a "<ticket>--<short>"
+// prefix so the ticket is visible in the path and in the picker.
+func dirNameFor(kind Kind, short, ticket string) string {
+	if kind == KindProject {
+		return short
+	}
+	return DirName(short, ticket)
+}
+
+// kindOrTask maps the zero Kind to KindTask so callers can leave it unset.
+func kindOrTask(k Kind) Kind {
+	if k == "" {
+		return KindTask
+	}
+	return k
+}
+
 func (s *Service) validateNew(opts NewOptions) error {
 	if len(opts.ShortName) > shortNameMaxLen || !shortNameRE.MatchString(opts.ShortName) {
 		return fmt.Errorf("%w: invalid short name %q: lowercase letters/digits/hyphens, no leading/trailing or double hyphens, max %d chars", ErrInvalidInput, opts.ShortName, shortNameMaxLen)
 	}
+	if k := kindOrTask(opts.Kind); k != KindTask && k != KindProject {
+		return fmt.Errorf("%w: kind %q must be %q or %q", ErrInvalidInput, opts.Kind, KindTask, KindProject)
+	}
 	if opts.Ticket != "" {
+		if opts.Kind == KindProject {
+			// Linear projects and initiatives are identified by a slug,
+			// not an issue number, so they are attached with
+			// Service.LinkLinear rather than encoded in the directory name.
+			return fmt.Errorf("%w: a project workspace cannot take a ticket — link it to a Linear project or initiative instead", ErrInvalidInput)
+		}
 		if s.TicketRE != nil && !s.TicketRE.MatchString(opts.Ticket) {
 			return fmt.Errorf("%w: ticket %q does not match pattern", ErrInvalidInput, opts.Ticket)
 		}

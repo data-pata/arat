@@ -268,3 +268,57 @@ func TestCombineOutput(t *testing.T) {
 	assert.Equal(t, "out\nerr", combineOutput("out\n", "err\n"))
 	assert.Equal(t, "", combineOutput("", ""))
 }
+
+func TestContainerList_projects(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"data":{"projects":{"nodes":[
+		{"slugId":"slug-1","name":"Q3 Billing","url":"https://linear.app/o/project/slug-1"},
+		{"slugId":"slug-2","name":"Dunning","url":"https://linear.app/o/project/slug-2"}
+	]}}}`)}
+	l := NewWithRunner(rr.run())
+
+	got, err := l.ContainerList(t.Context(), ContainerProject)
+	require.NoError(t, err)
+	assert.Equal(t, []Container{
+		{Kind: "project", ID: "slug-1", Name: "Q3 Billing", URL: "https://linear.app/o/project/slug-1"},
+		{Kind: "project", ID: "slug-2", Name: "Dunning", URL: "https://linear.app/o/project/slug-2"},
+	}, got)
+
+	require.Len(t, rr.calls, 1)
+	assert.Equal(t, "linear", rr.calls[0][0])
+	assert.Equal(t, "api", rr.calls[0][1])
+	assert.Contains(t, rr.calls[0][2], "projects(first: 250)")
+	assert.Contains(t, rr.calls[0][2], "slugId name url")
+}
+
+func TestContainerList_initiatives(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"data":{"initiatives":{"nodes":[
+		{"slugId":"abc123","name":"Payments 2026","url":"https://linear.app/o/initiative/abc123"}
+	]}}}`)}
+	l := NewWithRunner(rr.run())
+
+	got, err := l.ContainerList(t.Context(), ContainerInitiative)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "initiative", got[0].Kind)
+	assert.Equal(t, "abc123", got[0].ID)
+	assert.Contains(t, rr.calls[0][2], "initiatives(first: 250)")
+}
+
+func TestContainerList_unknownKind(t *testing.T) {
+	rr := &recorderRunner{}
+	l := NewWithRunner(rr.run())
+
+	_, err := l.ContainerList(t.Context(), "epic")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown container kind")
+	assert.Empty(t, rr.calls, "an unknown kind must not reach the linear binary")
+}
+
+func TestContainerList_graphqlErrors(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"errors":[{"message":"nope"}]}`)}
+	l := NewWithRunner(rr.run())
+
+	_, err := l.ContainerList(t.Context(), ContainerProject)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nope")
+}

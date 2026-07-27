@@ -39,7 +39,7 @@ type Deps struct {
 	Cwd           func() (string, error)
 	TicketFlow    TicketFlow
 	RepoFlow      RepoFlow
-	IsTTY         func() bool // returns whether stdin is a tty; defaults to false
+	IsTTY         func() bool                       // returns whether stdin is a tty; defaults to false
 	Confirm       func(prompt string) (bool, error) // y/N prompt; returns true only on explicit yes
 }
 
@@ -50,6 +50,9 @@ type LinearClient interface {
 	IssueList(ctx context.Context, opts linear.IssueListOptions) ([]linear.Issue, error)
 	IssueCreate(ctx context.Context, opts linear.IssueCreateOptions) (linear.IssueResult, error)
 	CommentAdd(ctx context.Context, opts linear.CommentAddOptions) error
+	// ContainerList returns Linear projects or initiatives ("project" /
+	// "initiative"), the two things `arat project link` can attach.
+	ContainerList(ctx context.Context, kind string) ([]linear.Container, error)
 }
 
 // TicketFlow is the interactive ticket-attachment flow. Returns either a
@@ -82,13 +85,20 @@ type RepoFlowResult struct {
 type Service interface {
 	List(ctx context.Context) ([]workspace.Workspace, error)
 	ListShallow(ctx context.Context) ([]workspace.Workspace, error)
-	Get(ctx context.Context, name string) (*workspace.Workspace, error)
+	Get(ctx context.Context, ref string) (*workspace.Workspace, error)
 	New(ctx context.Context, opts workspace.NewOptions) (*workspace.Workspace, error)
 	Remove(ctx context.Context, opts workspace.RemoveOptions) (*workspace.RemoveResult, error)
 	AttachTicket(ctx context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error)
 	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
 	ListRepoCandidates() ([]workspace.RepoCandidate, error)
 	MoveSessionFile(ctx context.Context, sessionID, targetWorkspacePath string) (srcPath, dstPath string, err error)
+	// WorkspaceAt resolves the workspace containing a directory (deepest wins).
+	WorkspaceAt(ctx context.Context, dir string) (*workspace.Workspace, error)
+	// ProjectAt resolves the nearest project containing a directory, or
+	// (nil, nil) when the directory is not inside a project.
+	ProjectAt(ctx context.Context, dir string) (*workspace.Workspace, error)
+	LinkLinear(ctx context.Context, opts workspace.LinkOptions) (*workspace.Workspace, error)
+	UnlinkLinear(ctx context.Context, ref string) (*workspace.Workspace, error)
 }
 
 // Root builds the root cobra command.
@@ -106,6 +116,12 @@ func Root(d Deps) *cobra.Command {
 Each workspace is a directory holding git worktrees of one or more repos plus
 a CLAUDE.md and claude_workspace/ scratch dir.
 
+Workspaces nest. A project workspace ("arat new <name> --project") contains
+other workspaces as subdirectories and may itself carry worktrees on a
+long-lived branch. Projects can contain projects. Commands that address a
+single workspace take a ref — the slash-joined path from workspaces_dir, e.g.
+"q3-billing/abc-12--invoice" — or a bare name that is unique across the tree.
+
 Commands accept --json where structured output is useful (ls, new, ticket create).
 Stderr is for operational messages; stdout is for results / JSON.
 
@@ -114,7 +130,7 @@ Exit codes:
   1  generic failure (uncategorized)
   2  usage error
   3  not found
-  4  precondition failed (dirty / unpushed / stash)
+  4  precondition failed (dirty / unpushed; non-empty project)
   5  conflict (already exists)
   6  external tool error (git, linear)
   7  config error
@@ -143,6 +159,7 @@ Exit codes:
 		newTicketCmd(state),
 		newNoteCmd(state),
 		newRepoCmd(state),
+		newProjectCmd(state),
 		newConfigCmd(state),
 		newVersionCmd(state),
 	)

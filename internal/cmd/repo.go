@@ -47,6 +47,7 @@ CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 			if err != nil {
 				return err
 			}
+			svc := s.deps.NewService(cfg)
 			name := wsName
 			if name == "" {
 				if s.deps.Cwd == nil {
@@ -56,13 +57,12 @@ CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 				if err != nil {
 					return &exitErr{code: ExitUsage, err: err}
 				}
-				resolved, err := workspaceFromCwd(wd, cfg.WorkspacesDir)
+				resolved, err := svc.WorkspaceAt(cmd.Context(), wd)
 				if err != nil {
 					return &exitErr{code: ExitUsage, err: err}
 				}
-				name = resolved
+				name = resolved.Ref
 			}
-			svc := s.deps.NewService(cfg)
 			res, err := svc.AddRepos(cmd.Context(), workspace.AddReposOptions{
 				Workspace: name,
 				Repos:     args,

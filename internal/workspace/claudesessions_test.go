@@ -244,3 +244,56 @@ func TestMoveSessionFile_errIfClaudeProjectsDirUnset(t *testing.T) {
 	_, _, err := s.MoveSessionFile(t.Context(), "sid", "/x")
 	require.ErrorIs(t, err, ErrInvalidInput)
 }
+
+func TestMoveSessionsForRename_nestedWorkspaceIsNotShadowedByItsProject(t *testing.T) {
+	// A workspace nested inside a project shares its project's encoded
+	// prefix. The sibling-collision guard must not read that as "these
+	// session dirs belong to the project" and skip the move.
+	wsDir := t.TempDir()
+	proj := filepath.Join(wsDir, "q3-billing")
+	require.NoError(t, os.MkdirAll(proj, 0o755))
+	oldPath := filepath.Join(proj, "invoice")
+	newPath := filepath.Join(proj, "abc-42--invoice")
+	require.NoError(t, os.MkdirAll(newPath, 0o755))
+
+	oldEnc := EncodeCwdAsProjectDir(oldPath)
+	newEnc := EncodeCwdAsProjectDir(newPath)
+	projEnc := EncodeCwdAsProjectDir(proj)
+	root := claudeRig(t, oldEnc, oldEnc+"-core-api", projEnc)
+
+	s := &Service{WorkspacesDir: wsDir, ClaudeProjectsDir: root}
+	warnings := s.MoveSessionsForRename(oldPath, newPath)
+	assert.Empty(t, warnings)
+
+	// The workspace's own dirs moved, including the one for its worktree.
+	assert.NoDirExists(t, filepath.Join(root, oldEnc))
+	assert.DirExists(t, filepath.Join(root, newEnc))
+	assert.NoDirExists(t, filepath.Join(root, oldEnc+"-core-api"))
+	assert.DirExists(t, filepath.Join(root, newEnc+"-core-api"))
+
+	// The containing project's own sessions are untouched.
+	assert.DirExists(t, filepath.Join(root, projEnc))
+}
+
+func TestMoveSessionsForRename_nestedSiblingCollisionStillGuarded(t *testing.T) {
+	// Within a project, `invoice` and `invoice-extra` coexist. The guard
+	// still has to keep them apart.
+	wsDir := t.TempDir()
+	proj := filepath.Join(wsDir, "q3-billing")
+	require.NoError(t, os.MkdirAll(filepath.Join(proj, "invoice-extra"), 0o755))
+	oldPath := filepath.Join(proj, "invoice")
+	newPath := filepath.Join(proj, "abc-42--invoice")
+	require.NoError(t, os.MkdirAll(newPath, 0o755))
+
+	oldEnc := EncodeCwdAsProjectDir(oldPath)
+	siblingEnc := EncodeCwdAsProjectDir(filepath.Join(proj, "invoice-extra"))
+	root := claudeRig(t, oldEnc, siblingEnc, siblingEnc+"-internal")
+
+	s := &Service{WorkspacesDir: wsDir, ClaudeProjectsDir: root}
+	warnings := s.MoveSessionsForRename(oldPath, newPath)
+	assert.Empty(t, warnings)
+
+	assert.NoDirExists(t, filepath.Join(root, oldEnc))
+	assert.DirExists(t, filepath.Join(root, siblingEnc))
+	assert.DirExists(t, filepath.Join(root, siblingEnc+"-internal"))
+}
