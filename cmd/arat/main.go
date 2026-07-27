@@ -86,8 +86,8 @@ func main() {
 		Cwd:       os.Getwd,
 		IsTTY:     func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
 		Confirm:   confirm,
-		TicketFlow: func(ctx context.Context, lr linear.Reader, team string, out io.Writer) (cmd.TicketFlowResult, error) {
-			res, err := tui.PickTicketFlow(ctx, lr, team, out)
+		TicketFlow: func(ctx context.Context, lr linear.Reader, opts cmd.TicketFlowOptions, out io.Writer) (cmd.TicketFlowResult, error) {
+			res, err := tui.PickTicketFlow(ctx, lr, tui.TicketFlowOptions{Team: opts.Team, AllowSkip: opts.AllowSkip}, out)
 			if err != nil {
 				return cmd.TicketFlowResult{}, err
 			}

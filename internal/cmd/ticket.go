@@ -22,9 +22,15 @@ func newTicketCmd(s *state) *cobra.Command {
 
 func newTicketAttachCmd(s *state) *cobra.Command {
 	return &cobra.Command{
-		Use:   "attach [ref] <ticket>",
-		Short: "Attach a ticket to an existing ticketless workspace",
+		Use: "attach [ref] <ticket>",
+		// Superseded by the kind-aware `arat attach`; kept as a working alias
+		// for scripts and muscle memory, out of help output.
+		Hidden: true,
+		Short:  "Attach a ticket to an existing ticketless workspace (legacy alias of `arat attach`)",
 		Long: `Attach a Linear ticket to a workspace that was created without one.
+
+Legacy alias: ` + "`arat attach`" + ` does the same and also handles project
+workspaces.
 
 With only a ticket argument, the workspace is the one containing the current
 directory — attaching a ticket to the workspace you are standing in is the

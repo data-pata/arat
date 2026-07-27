@@ -18,8 +18,8 @@ import (
 )
 
 // PickContainer opens an interactive picker over Linear projects and
-// initiatives, for `arat project link` without an explicit --project /
-// --initiative. Renders to `out` (typically stderr); reads from /dev/tty when
+// initiatives, for `arat attach` on a project
+// workspace (and the legacy `arat project link`) when nothing was named. Renders to `out` (typically stderr); reads from /dev/tty when
 // available. Returns the chosen container, or nil if the user cancelled.
 //
 // Like PickWorkspace, delegates to fzf when it is on PATH and falls back to
@@ -51,7 +51,7 @@ func pickContainerFzf(ctx context.Context, fzfPath string, containers []linear.C
 		"--height=~40%",
 		"--delimiter=\t",
 		"--with-nth=2..",
-		"--prompt=arat project link ❯ ",
+		"--prompt=arat attach ❯ ",
 	)
 	cmd.Stdin = &in
 	cmd.Stdout = &out

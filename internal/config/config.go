@@ -158,7 +158,7 @@ root = "~/git/<your-org>"
 branch_prefix = "<your-initials>"
 
 # Regex a ticket id must match (lowercased before matching). Used to validate
-# --ticket on "arat new" / "arat ticket attach" and to recognise the ticket in
+# --ticket on "arat new" / "arat attach" and to recognise the ticket in
 # existing workspace directory names.
 # ticket_pattern = "^[a-z]+-[0-9]+$"
 

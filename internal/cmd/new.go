@@ -40,7 +40,7 @@ Projects and nesting, mirroring Linear:
   --project      create a container workspace instead of a leaf. It holds
                  other workspaces as subdirectories and gets no worktrees
                  unless --repos is given. A project attaches to a Linear
-                 project or initiative via "arat project link", never to an
+                 project or initiative via "arat attach", never to an
                  issue. Projects always live at the top level: Linear has no
                  project inside a project or inside an issue.
   --in <ref>     create this workspace inside the named workspace. A task in
@@ -92,7 +92,7 @@ default_repos and auto_repos_glob.
 				return &exitErr{code: ExitUsage, err: err}
 			}
 			if projectMode && (ticket != "" || newTicket != "") {
-				return &exitErr{code: ExitUsage, err: errors.New("--project cannot take a ticket: a project links to a Linear project or initiative via `arat project link`, not to an issue")}
+				return &exitErr{code: ExitUsage, err: errors.New("--project cannot take a ticket: a project links to a Linear project or initiative via `arat attach`, not to an issue")}
 			}
 			if projectMode && in != "" {
 				return &exitErr{code: ExitUsage, err: errors.New("--project cannot be combined with --in: projects live at the top level and hold workspaces, not the other way round")}
@@ -166,7 +166,7 @@ default_repos and auto_repos_glob.
 			if ticket == "" && !noTicket && !projectMode && cfg.Linear.Enabled && isInteractive(s.deps) && s.deps.TicketFlow != nil {
 				lc := s.deps.NewLinear()
 				if err := lc.Available(cmd.Context()); err == nil {
-					res, err := s.deps.TicketFlow(cmd.Context(), lc, cfg.Linear.DefaultTeam, s.deps.Stderr)
+					res, err := s.deps.TicketFlow(cmd.Context(), lc, TicketFlowOptions{Team: cfg.Linear.DefaultTeam, AllowSkip: true}, s.deps.Stderr)
 					if err != nil {
 						return &exitErr{code: ExitExternal, err: err}
 					}

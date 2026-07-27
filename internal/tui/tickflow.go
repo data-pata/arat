@@ -48,15 +48,24 @@ type composeResult struct {
 // composePrompt is the type of askCompose, lifted out for tests.
 type composePrompt func(ctx context.Context, out io.Writer) (composeResult, error)
 
+// TicketFlowOptions controls PickTicketFlow.
+type TicketFlowOptions struct {
+	Team string
+	// AllowSkip offers a "skip" choice in the action chooser. `arat new` has
+	// a meaningful skip (create the workspace ticketless); `arat attach` does
+	// not — skipping there is just cancelling — so it hides the option.
+	AllowSkip bool
+}
+
 // PickTicketFlow runs the full interactive ticket flow. See dispatch for the
 // state-machine; this thin entrypoint wires the real action-chooser, issue
 // picker, and compose prompt.
-func PickTicketFlow(ctx context.Context, lc linear.Reader, team string, out io.Writer) (TicketFlowResult, error) {
-	action, err := pickTicketAction(ctx, out)
+func PickTicketFlow(ctx context.Context, lc linear.Reader, opts TicketFlowOptions, out io.Writer) (TicketFlowResult, error) {
+	action, err := pickTicketAction(ctx, opts.AllowSkip, out)
 	if err != nil {
 		return TicketFlowResult{}, err
 	}
-	return dispatchAction(ctx, action, lc, team, pickIssue, askCompose, out)
+	return dispatchAction(ctx, action, lc, opts.Team, pickIssue, askCompose, out)
 }
 
 // dispatchAction is the pure (testable) state-machine that turns a chosen
@@ -129,12 +138,15 @@ type actionModel struct {
 	resolved bool
 }
 
-func newActionModel() *actionModel {
-	items := []list.Item{
-		actionItem{"Skip ticket", "create the workspace without a ticket attached", ActionSkip},
+func newActionModel(allowSkip bool) *actionModel {
+	var items []list.Item
+	if allowSkip {
+		items = append(items, actionItem{"Skip ticket", "create the workspace without a ticket attached", ActionSkip})
+	}
+	items = append(items,
 		actionItem{"Pick existing", "choose from your open Linear issues", ActionPick},
 		actionItem{"Create new", "type a title (and optional description) to create one inline", ActionCreate},
-	}
+	)
 	delegate := list.NewDefaultDelegate()
 	l := list.New(items, delegate, 0, 0)
 	l.Title = "Attach a ticket?"
@@ -176,8 +188,8 @@ func (m *actionModel) View() string {
 	return m.list.View()
 }
 
-func pickTicketAction(ctx context.Context, out io.Writer) (TicketAction, error) {
-	m := newActionModel()
+func pickTicketAction(ctx context.Context, allowSkip bool, out io.Writer) (TicketAction, error) {
+	m := newActionModel(allowSkip)
 	opts, cleanup := programOpts(ctx, out)
 	defer cleanup()
 	prog := tea.NewProgram(m, opts...)

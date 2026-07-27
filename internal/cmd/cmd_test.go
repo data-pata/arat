@@ -223,6 +223,10 @@ type fakeLinear struct {
 	createCalls    []linear.IssueCreateOptions
 	commentCalls   []linear.CommentAddOptions
 	containerCalls []string
+
+	projectCreateResult linear.Container
+	projectCreateErr    error
+	projectCreateCalls  []linear.ProjectCreateOptions
 }
 
 func (f *fakeLinear) Available(context.Context) error {
@@ -242,6 +246,10 @@ func (f *fakeLinear) IssueCreate(_ context.Context, opts linear.IssueCreateOptio
 func (f *fakeLinear) CommentAdd(_ context.Context, opts linear.CommentAddOptions) error {
 	f.commentCalls = append(f.commentCalls, opts)
 	return f.commentErr
+}
+func (f *fakeLinear) ProjectCreate(_ context.Context, opts linear.ProjectCreateOptions) (linear.Container, error) {
+	f.projectCreateCalls = append(f.projectCreateCalls, opts)
+	return f.projectCreateResult, f.projectCreateErr
 }
 func (f *fakeLinear) ContainerList(_ context.Context, kind string) ([]linear.Container, error) {
 	f.containerCalls = append(f.containerCalls, kind)
@@ -457,7 +465,7 @@ func TestNew_codeWorkspaceFlag(t *testing.T) {
 func TestNew_interactivePickAttachesTicket(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Ticket: "ABC-9"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -469,7 +477,7 @@ func TestNew_interactivePickAttachesTicket(t *testing.T) {
 func TestNew_interactiveSkipped(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Skip: true}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -480,7 +488,7 @@ func TestNew_interactiveSkipped(t *testing.T) {
 
 func TestNew_interactiveCancelled(t *testing.T) {
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{Cancelled: true}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, &fakeService{}, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -490,7 +498,7 @@ func TestNew_interactiveCancelled(t *testing.T) {
 func TestNew_interactiveCreatesTicket(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{NewTitle: "Fix the bug", NewDescription: "body line"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -506,7 +514,7 @@ func TestNew_interactiveCreatesTicket(t *testing.T) {
 
 func TestNew_interactiveCreateFailureSurfaces(t *testing.T) {
 	lc := &fakeLinear{available: true, createErr: errors.New("linear down")}
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		return TicketFlowResult{NewTitle: "Fix the bug"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, &fakeService{}, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
@@ -571,7 +579,7 @@ func TestNew_newTicketSkipsInteractiveFlow(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-1--x", Path: "/p"}}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-1"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -599,7 +607,7 @@ func TestNew_noFlowWhenNotTTY(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -613,7 +621,7 @@ func TestNew_noFlowWhenLinearDisabled(t *testing.T) {
 	cfg := &config.Config{Root: "/tmp", BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: false}}
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -625,7 +633,7 @@ func TestNew_noFlowWhenLinearDisabled(t *testing.T) {
 func TestNew_explicitNoTicketSkipsFlow(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}
@@ -728,7 +736,7 @@ func TestNew_interactiveRepoPickerListErrorPropagates(t *testing.T) {
 func TestNew_explicitTicketSkipsFlow(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ string, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
 		flowCalled = true
 		return TicketFlowResult{}, nil
 	}

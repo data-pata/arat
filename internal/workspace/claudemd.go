@@ -55,7 +55,7 @@ func renderClaudeMD(opts NewOptions, repos []string, branch, ticketURL string, n
 
 	return fmt.Sprintf(`# %s
 
-%sWorking copy — no ticket attached yet. Once one exists, run `+"`arat ticket attach %s <ticket>`"+`.
+%sWorking copy — no ticket attached yet. Once one exists, run `+"`arat attach %s <ticket>`"+`.
 
 **Branch**: `+"`%s`"+`
 **Started**: %s
@@ -89,7 +89,7 @@ turn may hold sub-issues, nested the same way.
 %s
 Create work inside it with `+"`arat new <short-name>`"+` from this directory, or
 `+"`arat new <short-name> --in %s`"+` from anywhere. Link it to a Linear project
-or initiative with `+"`arat project link %s`"+`.
+or initiative with `+"`arat attach %s`"+`.
 
 ## Scope
 

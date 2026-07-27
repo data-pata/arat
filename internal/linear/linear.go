@@ -228,7 +228,7 @@ const (
 	ContainerInitiative = "initiative"
 )
 
-// ContainerLister is the read surface `arat project link` consumes.
+// ContainerLister is the read surface project-workspace attaching consumes.
 type ContainerLister interface {
 	ContainerList(ctx context.Context, kind string) ([]Container, error)
 }
@@ -314,6 +314,73 @@ func (l *Linear) ContainerList(ctx context.Context, kind string) ([]Container, e
 		cursor = data.PageInfo.EndCursor
 	}
 	return nil, fmt.Errorf("linear api: %s pagination did not terminate after %d pages", root, containerMaxPages)
+}
+
+// ProjectCreateOptions controls ProjectCreate.
+type ProjectCreateOptions struct {
+	Name        string // required
+	Team        string // required team key (e.g. "ABC") — `linear project create` demands one
+	Description string // optional; Linear's API caps it at 255 characters
+}
+
+// ProjectCreate runs `linear project create --json ...` and returns the new
+// project as a Container, ready to be linked to a workspace.
+//
+// Unlike issue create, the project subcommand offers --json, so the result is
+// decoded directly instead of regex-scraped from table output.
+func (l *Linear) ProjectCreate(ctx context.Context, opts ProjectCreateOptions) (Container, error) {
+	if strings.TrimSpace(opts.Name) == "" {
+		return Container{}, errors.New("project name is required")
+	}
+	if strings.TrimSpace(opts.Team) == "" {
+		return Container{}, errors.New("team is required to create a linear project")
+	}
+
+	args := []string{"project", "create", "--json", "--name", opts.Name, "--team", opts.Team}
+
+	var cleanup func()
+	if opts.Description != "" {
+		if strings.ContainsRune(opts.Description, '\n') {
+			path, c, err := writeTempFile("arat-projdesc-", ".md", opts.Description)
+			if err != nil {
+				return Container{}, fmt.Errorf("write description tempfile: %w", err)
+			}
+			cleanup = c
+			args = append(args, "--description-file", path)
+		} else {
+			args = append(args, "--description", opts.Description)
+		}
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	stdout, stderr, err := l.run(ctx, "linear", args...)
+	if err != nil {
+		return Container{}, fmt.Errorf("linear project create: %w: %s", err, strings.TrimSpace(string(stderr)))
+	}
+
+	// Shape per linear-cli: {"success": bool, "project": {id, slugId, name, url}}.
+	var resp struct {
+		Success bool `json:"success"`
+		Project struct {
+			SlugID string `json:"slugId"`
+			Name   string `json:"name"`
+			URL    string `json:"url"`
+		} `json:"project"`
+	}
+	if err := json.Unmarshal(stdout, &resp); err != nil {
+		return Container{}, fmt.Errorf("decode linear project create output: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+	}
+	if resp.Project.SlugID == "" {
+		return Container{}, fmt.Errorf("linear project create: no project in response (output: %s)", strings.TrimSpace(string(stdout)))
+	}
+	return Container{
+		Kind: ContainerProject,
+		ID:   resp.Project.SlugID,
+		Name: resp.Project.Name,
+		URL:  resp.Project.URL,
+	}, nil
 }
 
 // CommentAddOptions controls CommentAdd.

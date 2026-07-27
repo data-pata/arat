@@ -34,7 +34,7 @@ func (s *Service) LinkLinear(ctx context.Context, opts LinkOptions) (*Workspace,
 		return nil, err
 	}
 	if !ws.IsProject() {
-		return nil, fmt.Errorf("%w: %s is a task workspace — attach an issue with `arat ticket attach` instead", ErrInvalidInput, ws.Ref)
+		return nil, fmt.Errorf("%w: %s is a task workspace — it attaches to an issue (`arat attach <ticket>`), not to a Linear project", ErrInvalidInput, ws.Ref)
 	}
 
 	ref := opts.Linear

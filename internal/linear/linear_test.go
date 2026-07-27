@@ -361,3 +361,64 @@ func TestContainerList_nonAdvancingCursorTerminates(t *testing.T) {
 	assert.Len(t, got, 2, "first page plus the one repeat before the stuck cursor is detected")
 	assert.Len(t, rr.calls, 2)
 }
+
+func TestProjectCreate_argvShapeAndParse(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"success": true, "project": {"id": "uuid", "slugId": "abc123def", "name": "New Proj", "url": "https://linear.app/x/project/new-proj-abc123def"}}`)}
+	l := NewWithRunner(rr.run())
+
+	got, err := l.ProjectCreate(t.Context(), ProjectCreateOptions{
+		Name:        "New Proj",
+		Team:        "ABC",
+		Description: "one line",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, ContainerProject, got.Kind)
+	assert.Equal(t, "abc123def", got.ID)
+	assert.Equal(t, "New Proj", got.Name)
+	assert.Equal(t, "https://linear.app/x/project/new-proj-abc123def", got.URL)
+
+	require.Len(t, rr.calls, 1)
+	assert.Equal(t, []string{
+		"linear", "project", "create", "--json",
+		"--name", "New Proj",
+		"--team", "ABC",
+		"--description", "one line",
+	}, rr.calls[0])
+}
+
+func TestProjectCreate_multilineDescriptionUsesFile(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte(`{"success": true, "project": {"slugId": "s", "name": "n", "url": "u"}}`)}
+	l := NewWithRunner(rr.run())
+
+	_, err := l.ProjectCreate(t.Context(), ProjectCreateOptions{
+		Name:        "n",
+		Team:        "ABC",
+		Description: "line one\nline two",
+	})
+	require.NoError(t, err)
+	require.Len(t, rr.calls, 1)
+	joined := strings.Join(rr.calls[0], " ")
+	assert.Contains(t, joined, "--description-file")
+	assert.NotContains(t, joined, "--description ")
+}
+
+func TestProjectCreate_requiresNameAndTeam(t *testing.T) {
+	l := NewWithRunner((&recorderRunner{}).run())
+	_, err := l.ProjectCreate(t.Context(), ProjectCreateOptions{Team: "ABC"})
+	require.Error(t, err)
+	_, err = l.ProjectCreate(t.Context(), ProjectCreateOptions{Name: "n"})
+	require.Error(t, err)
+}
+
+func TestProjectCreate_badOutputIsAnError(t *testing.T) {
+	rr := &recorderRunner{stdout: []byte("not json")}
+	l := NewWithRunner(rr.run())
+	_, err := l.ProjectCreate(t.Context(), ProjectCreateOptions{Name: "n", Team: "ABC"})
+	require.Error(t, err)
+
+	rr = &recorderRunner{stdout: []byte(`{"success": false}`)}
+	l = NewWithRunner(rr.run())
+	_, err = l.ProjectCreate(t.Context(), ProjectCreateOptions{Name: "n", Team: "ABC"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no project in response")
+}

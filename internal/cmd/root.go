@@ -37,8 +37,9 @@ type Deps struct {
 	NewService    func(cfg *config.Config) Service
 	PickWorkspace func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error)
 	// PickContainer is the interactive picker over Linear projects and
-	// initiatives, used by `arat project link` when no --project/--initiative
-	// was given. Returns nil (no error) when the user cancels.
+	// initiatives, used by `arat attach` on a project workspace (and the
+	// legacy `arat project link`) when nothing was named. Returns nil (no
+	// error) when the user cancels.
 	PickContainer func(ctx context.Context, containers []linear.Container, out io.Writer) (*linear.Container, error)
 	NewLinear     func() LinearClient
 	Cwd           func() (string, error)
@@ -56,14 +57,27 @@ type LinearClient interface {
 	IssueCreate(ctx context.Context, opts linear.IssueCreateOptions) (linear.IssueResult, error)
 	CommentAdd(ctx context.Context, opts linear.CommentAddOptions) error
 	// ContainerList returns Linear projects or initiatives ("project" /
-	// "initiative"), the two things `arat project link` can attach.
+	// "initiative"), the two things a project workspace can attach to.
 	ContainerList(ctx context.Context, kind string) ([]linear.Container, error)
+	// ProjectCreate creates a Linear project, for `arat attach --new` on a
+	// project workspace.
+	ProjectCreate(ctx context.Context, opts linear.ProjectCreateOptions) (linear.Container, error)
+}
+
+// TicketFlowOptions parameterizes the interactive ticket flow per calling
+// command.
+type TicketFlowOptions struct {
+	Team string
+	// AllowSkip offers a "skip" choice: meaningful for `arat new` (create the
+	// workspace ticketless), absent for `arat attach` (skipping is just
+	// cancelling).
+	AllowSkip bool
 }
 
 // TicketFlow is the interactive ticket-attachment flow. Returns either a
 // chosen ticket id (string) or empty (skip). Tests inject a fake; the real
 // impl lives in internal/tui.
-type TicketFlow func(ctx context.Context, lc linear.Reader, team string, out io.Writer) (TicketFlowResult, error)
+type TicketFlow func(ctx context.Context, lc linear.Reader, opts TicketFlowOptions, out io.Writer) (TicketFlowResult, error)
 
 // TicketFlowResult: a parallel of tui.TicketFlowResult, but lifted to the
 // cmd package so cmd code doesn't import tui directly.
@@ -138,7 +152,7 @@ candidates; "./<ref>" matches a ref exactly, which is how a top-level
 workspace is addressed when a nested one shares its name.
 
 Commands accept --json where structured output is useful (ls, new, go, rm,
-repo add, ticket create, project link|unlink). Stderr is for operational
+attach, detach, repo add, ticket create). Stderr is for operational
 messages; stdout is for results / JSON.
 
 Exit codes:
@@ -174,6 +188,8 @@ Exit codes:
 		newNewCmd(state),
 		newRmCmd(state),
 		newGoCmd(state),
+		newAttachCmd(state),
+		newDetachCmd(state),
 		newInitCmd(state),
 		newTicketCmd(state),
 		newNoteCmd(state),

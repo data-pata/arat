@@ -21,9 +21,9 @@ many-repos-in-a-parent-directory layout.
 
 ## Status
 
-Working: `ls`, `new`, `rm`, `go` (with picker), `init`, `ticket
-create|attach`, `repo add`, `note`, `project link|unlink`, `config init|path`,
-`version`. Targeted unit + real-git integration coverage.
+Working: `ls`, `new`, `rm`, `go` (with picker), `attach`, `detach`, `init`,
+`ticket create`, `repo add`, `note`, `config init|path`, `version`. Targeted
+unit + real-git integration coverage.
 
 ## Install
 
@@ -82,19 +82,21 @@ default_team  = "ABC"
 | `arat new <name> [--project] [--in REF] [--ticket TKT \| --no-ticket] [--repos a,b] [--from-current] [--carry-context] [--carry-session ID] [--code-workspace]` | Create workspace + worktrees + CLAUDE.md. Without `--ticket`/`--no-ticket` and on a tty: opens an interactive ticket flow. `--project` creates a top-level container instead of a leaf; `--in <ref>` places the new workspace inside another one (`--in .` for the workspace at cwd), and `--from-parent` branches off that parent's branches. `--carry-session` moves a Claude Code session jsonl into the new workspace's project dir so `/resume` finds it after `cd`. |
 | `arat rm [ref] [--force] [--keep-branches] [--recursive]` (alias `kill`) | Remove workspace; refuses on dirty/unpushed unless `--force`, and on a workspace that still has others nested inside it unless `--recursive`. No ref → interactive picker. |
 | `arat go [ref]` | Print path to a workspace. With shell wrapper, `cd`s into it. No ref → interactive picker. |
-| `arat project link [ref] [--project \| --initiative <slug-or-name>]` | Link a project workspace to a Linear project or initiative. Without a ref, targets the project containing cwd. Without a flag, on a tty, opens a picker over both kinds. |
-| `arat project unlink [ref]` | Remove a project workspace's Linear link. Without a ref, targets the project containing cwd. |
-| `arat ticket create -t <title> [--team] [--project] [--state] [-d desc] [-l label]` | Create a Linear issue via `linear issue create --no-interactive`. |
-| `arat ticket attach [ref] <ticket>` | Attach a ticket to a ticketless workspace (without a ref: the workspace containing cwd); renames dirs/branches, updates CLAUDE.md, and migrates `~/.claude/projects/<encoded>` session dirs to the new path. |
+| `arat attach [ref] [ticket-or-name] [--new "<title>"] [-d desc]` | Attach a workspace to its Linear counterpart, chosen by the workspace's kind. Task workspace: attach an issue by id (renames dirs/branches, updates CLAUDE.md, migrates `~/.claude/projects/<encoded>` session dirs), or pick/compose one interactively, or `--new` to create it first. Project workspace: link a Linear project or initiative by slug id or name (interactive picker without an argument), or `--new` to create the Linear project in `linear.default_team`. Without a ref: the workspace containing cwd. |
+| `arat detach [ref]` | Remove a project workspace's Linear link. A task's ticket cannot be detached (it is baked into dir and branch names). Without a ref: the workspace containing cwd. |
+| `arat ticket create -t <title> [--team] [--project] [--state] [-d desc] [-l label]` | Create a Linear issue via `linear issue create --no-interactive`, without touching any workspace. Prints the id for piping. |
 | `arat repo add [--workspace NAME] [--base REF] [--recursive] <repo>...` | Add one or more git worktrees to an existing multi-repo workspace, on its existing feature branch. Workspace inferred from cwd if `--workspace` omitted. `--recursive` fans out to every nested workspace, skipping ones that already carry the repo. |
 | `arat note [name] <text...>` | Post a comment on the workspace's Linear ticket. Workspace inferred from cwd if name omitted. |
 | `arat init <bash\|zsh\|fish>` | Print shell integration. |
 | `arat config init [--force] / path` | Write / resolve the config file. |
 | `arat version` | Version + git sha. |
 
-`--json` is honoured on `ls`, `new`, `go`, `rm`, `repo add`, `ticket create`,
-and `project link|unlink`. All commands write results to stdout, operational
-messages to stderr.
+`--json` is honoured on `ls`, `new`, `go`, `rm`, `attach`, `detach`,
+`repo add`, and `ticket create`. All commands write results to stdout,
+operational messages to stderr.
+
+The pre-consolidation forms `arat ticket attach` and `arat project
+link|unlink` still work as hidden aliases of `attach`/`detach`.
 
 ## Exit codes
 
@@ -193,7 +195,7 @@ Things worth knowing:
   about discarding whole *workspaces*.
 - **Linear linking is optional, on both projects and their children.** A
   project workspace works with no Linear link at all. When you do link one, it
-  attaches to a Linear **project or initiative** (`arat project link`), not to
+  attaches to a Linear **project or initiative** (`arat attach`), not to
   an issue. Initiatives are the only Linear container that nests, and arat has
   no separate workspace kind for them, so a top-level project workspace may
   link to either kind, or to nothing.

@@ -14,7 +14,7 @@ import (
 )
 
 func TestActionModel_enterSelectsCurrent(t *testing.T) {
-	m := newActionModel()
+	m := newActionModel(true)
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	require.NotNil(t, cmd)
 	am := updated.(*actionModel)
@@ -23,7 +23,7 @@ func TestActionModel_enterSelectsCurrent(t *testing.T) {
 }
 
 func TestActionModel_arrowDownThenEnter(t *testing.T) {
-	m := newActionModel()
+	m := newActionModel(true)
 	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	m = next.(*actionModel)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -32,7 +32,7 @@ func TestActionModel_arrowDownThenEnter(t *testing.T) {
 }
 
 func TestActionModel_quitCancels(t *testing.T) {
-	m := newActionModel()
+	m := newActionModel(true)
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	require.NotNil(t, cmd)
 	am := updated.(*actionModel)
@@ -40,7 +40,7 @@ func TestActionModel_quitCancels(t *testing.T) {
 }
 
 func TestActionModel_view(t *testing.T) {
-	m := newActionModel()
+	m := newActionModel(true)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	v := m.View()
 	assert.Contains(t, v, "Skip ticket")
@@ -52,7 +52,7 @@ func TestActionModel_view(t *testing.T) {
 }
 
 func TestActionModel_windowSize(t *testing.T) {
-	m := newActionModel()
+	m := newActionModel(true)
 	_, _ = m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.True(t, updated.(*actionModel).resolved)
@@ -302,7 +302,7 @@ func TestComposeModel_init(t *testing.T) {
 }
 
 func TestActionAndIssueModelInit(t *testing.T) {
-	assert.Nil(t, newActionModel().Init())
+	assert.Nil(t, newActionModel(true).Init())
 	assert.Nil(t, newIssueModel(nil).Init())
 }
 
@@ -315,4 +315,16 @@ func TestIssueModel_view(t *testing.T) {
 	chosen := linear.Issue{ID: "ABC-1"}
 	m.chosen = &chosen
 	assert.Empty(t, m.View())
+}
+
+func TestActionModel_noSkipForAttach(t *testing.T) {
+	m := newActionModel(false)
+	_, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
+	v := m.View()
+	assert.NotContains(t, v, "Skip ticket")
+	assert.Contains(t, v, "Pick existing")
+	assert.Contains(t, v, "Create new")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, ActionPick, updated.(*actionModel).chosen, "first entry without skip is Pick")
 }

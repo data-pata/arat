@@ -24,8 +24,10 @@ Convention: packages declare their deps as interfaces, composition lives in
 
 ## Commands (target)
 
-`new`, `ls`, `rm`, `go`, `ticket attach|create`, `note`, `repo add`,
-`project link|unlink`, `init <shell>`, `config init|path`, `version`. Stable
+`new`, `ls`, `rm`, `go`, `attach`, `detach`, `ticket create`, `note`,
+`repo add`, `init <shell>`, `config init|path`, `version`. `attach`/`detach`
+are kind-aware (task ↔ issue, project ↔ Linear project/initiative); the older
+`ticket attach` and `project link|unlink` remain as hidden aliases. Stable
 exit codes, `--json` where parsing matters.
 
 ## Workspace tree

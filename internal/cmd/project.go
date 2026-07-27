@@ -14,8 +14,11 @@ import (
 
 func newProjectCmd(s *state) *cobra.Command {
 	c := &cobra.Command{
-		Use:   "project",
-		Short: "Manage project workspaces and their Linear links",
+		Use: "project",
+		// Superseded by the kind-aware `arat attach`/`arat detach`; kept as
+		// working aliases for scripts and muscle memory, out of help output.
+		Hidden: true,
+		Short:  "Manage project workspaces' Linear links (legacy aliases of `arat attach`/`arat detach`)",
 		Long: `A project workspace is a container: other workspaces live inside it as
 subdirectories, and it may itself hold worktrees on a long-lived branch.
 
@@ -109,7 +112,7 @@ The resolved name and URL are cached in the workspace's marker file so
 				if err != nil {
 					return &exitErr{code: ExitExternal, err: err}
 				}
-				match, err = resolveContainer(containers, query)
+				match, err = resolveContainer(containers, query, kind)
 				if err != nil {
 					return &exitErr{code: ExitNotFound, err: err}
 				}
@@ -194,8 +197,9 @@ a project that is not linked succeeds and does nothing.
 			}
 			s.writer().JSONRecord(ws, func(out io.Writer) {
 				fmt.Fprintf(out, "%s\n", ws.Path)
-				fmt.Fprintf(s.deps.Stderr, "unlinked %s\n", ws.Ref)
 			})
+			// Outside the JSON closure so --json does not swallow it.
+			fmt.Fprintf(s.deps.Stderr, "unlinked %s\n", ws.Ref)
 			return nil
 		},
 	}
@@ -220,20 +224,19 @@ func projectLinkTarget(projectName, initiativeName string) (kind, query string, 
 // lets the user pick one. The caller has already verified a terminal and a
 // wired picker.
 func pickContainerInteractive(cmd *cobra.Command, s *state, lc LinearClient) (*linear.Container, error) {
-	projects, err := lc.ContainerList(cmd.Context(), linear.ContainerProject)
+	containers, err := fetchAllContainers(cmd, lc)
 	if err != nil {
-		return nil, &exitErr{code: ExitExternal, err: err}
-	}
-	initiatives, err := lc.ContainerList(cmd.Context(), linear.ContainerInitiative)
-	if err != nil {
-		return nil, &exitErr{code: ExitExternal, err: err}
+		return nil, err
 	}
 
 	// Projects first, then initiatives, each sorted by name: linking to a
 	// project is the common case, and a stable order makes the list scannable.
-	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
-	sort.Slice(initiatives, func(i, j int) bool { return initiatives[i].Name < initiatives[j].Name })
-	containers := append(projects, initiatives...)
+	sort.Slice(containers, func(i, j int) bool {
+		if containers[i].Kind != containers[j].Kind {
+			return containers[i].Kind == linear.ContainerProject
+		}
+		return containers[i].Name < containers[j].Name
+	})
 	if len(containers) == 0 {
 		return nil, &exitErr{code: ExitNotFound, err: errors.New("no linear projects or initiatives found")}
 	}
@@ -252,7 +255,9 @@ func pickContainerInteractive(cmd *cobra.Command, s *state, lc LinearClient) (*l
 // to. An exact slug id wins outright; otherwise the name is matched
 // case-insensitively. Multiple name matches are reported rather than guessed
 // at, since linking the wrong one is silent and easy to miss afterwards.
-func resolveContainer(containers []linear.Container, query string) (linear.Container, error) {
+// `what` names the kind(s) the candidates were fetched for, so the not-found
+// message says what was searched.
+func resolveContainer(containers []linear.Container, query, what string) (linear.Container, error) {
 	for _, c := range containers {
 		if c.ID == query {
 			return c, nil
@@ -269,26 +274,16 @@ func resolveContainer(containers []linear.Container, query string) (linear.Conta
 	case 1:
 		return matches[0], nil
 	case 0:
-		return linear.Container{}, fmt.Errorf("no linear %s matches %q", containerKindOf(containers), query)
+		return linear.Container{}, fmt.Errorf("no linear %s matches %q", what, query)
 	}
 
 	names := make([]string, 0, len(matches))
 	for _, m := range matches {
-		names = append(names, fmt.Sprintf("%s (%s)", m.Name, m.ID))
+		names = append(names, fmt.Sprintf("%s %s (%s)", m.Kind, m.Name, m.ID))
 	}
 	sort.Strings(names)
 	return linear.Container{}, fmt.Errorf("%q matches %d linear entries: %s\nuse the slug id to disambiguate",
 		query, len(matches), strings.Join(names, ", "))
-}
-
-// containerKindOf reports the kind the candidate list was fetched for, so the
-// "not found" message names the right thing. Falls back to a neutral word for
-// an empty list.
-func containerKindOf(containers []linear.Container) string {
-	if len(containers) > 0 {
-		return containers[0].Kind
-	}
-	return "project or initiative"
 }
 
 func mapProjectError(err error) error {

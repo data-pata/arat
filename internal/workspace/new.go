@@ -355,7 +355,7 @@ func (s *Service) validateNew(opts NewOptions) error {
 			return fmt.Errorf("%w: a project workspace cannot take a ticket — link it to a Linear project or initiative instead", ErrInvalidInput)
 		}
 		if s.TicketRE != nil && !s.TicketRE.MatchString(opts.Ticket) {
-			return fmt.Errorf("%w: ticket %q does not match pattern", ErrInvalidInput, opts.Ticket)
+			return fmt.Errorf("%w: ticket %q does not match the configured ticket_pattern %s", ErrInvalidInput, opts.Ticket, s.TicketRE)
 		}
 	}
 	return nil

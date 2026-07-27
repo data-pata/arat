@@ -48,7 +48,7 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 		return nil, fmt.Errorf("%w: ticket is required", ErrInvalidInput)
 	}
 	if s.TicketRE != nil && !s.TicketRE.MatchString(opts.Ticket) {
-		return nil, fmt.Errorf("%w: ticket %q does not match pattern", ErrInvalidInput, opts.Ticket)
+		return nil, fmt.Errorf("%w: ticket %q does not match the configured ticket_pattern %s", ErrInvalidInput, opts.Ticket, s.TicketRE)
 	}
 
 	current, err := s.Get(ctx, opts.Name)
@@ -56,7 +56,7 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 		return nil, err
 	}
 	if current.IsProject() {
-		return nil, fmt.Errorf("%w: %s is a project — link it to a Linear project or initiative with `arat project link` instead", ErrInvalidInput, current.Ref)
+		return nil, fmt.Errorf("%w: %s is a project — it attaches to a Linear project or initiative (`arat attach`), not to an issue", ErrInvalidInput, current.Ref)
 	}
 	if current.Ticket != "" {
 		return nil, &ErrPrecondition{Reasons: []string{
