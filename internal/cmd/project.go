@@ -88,13 +88,16 @@ The resolved name and URL are cached in the workspace's marker file so
 
 			// Resolve the target before any Linear round-trips, so a wrong
 			// ref (or not standing in a project) fails fast.
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 			ref, err := projectRefFromArgsOrCwd(cmd, s, svc, args)
 			if err != nil {
 				return err
 			}
 
-			lc := s.deps.NewLinear()
+			lc := s.deps.NewLinear(cfg)
 			if err := lc.Available(cmd.Context()); err != nil {
 				return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 			}
@@ -186,7 +189,10 @@ a project that is not linked succeeds and does nothing.
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 			ref, err := projectRefFromArgsOrCwd(cmd, s, svc, args)
 			if err != nil {
 				return err
@@ -223,7 +229,7 @@ func projectLinkTarget(projectName, initiativeName string) (kind, query string, 
 // pickContainerInteractive fetches every Linear project and initiative and
 // lets the user pick one. The caller has already verified a terminal and a
 // wired picker.
-func pickContainerInteractive(cmd *cobra.Command, s *state, lc LinearClient) (*linear.Container, error) {
+func pickContainerInteractive(cmd *cobra.Command, s *state, lc linear.ContainerLister) (*linear.Container, error) {
 	containers, err := fetchAllContainers(cmd, lc)
 	if err != nil {
 		return nil, err
@@ -243,7 +249,7 @@ func pickContainerInteractive(cmd *cobra.Command, s *state, lc LinearClient) (*l
 
 	picked, err := s.deps.PickContainer(cmd.Context(), containers, s.deps.Stderr)
 	if err != nil {
-		return nil, &exitErr{code: ExitExternal, err: err}
+		return nil, &exitErr{code: ExitGeneric, err: err}
 	}
 	if picked == nil {
 		return nil, &exitErr{code: ExitUsage, err: errors.New("cancelled")}
@@ -296,5 +302,5 @@ func mapProjectError(err error) error {
 	case errors.Is(err, workspace.ErrInvalidInput):
 		return &exitErr{code: ExitUsage, err: err}
 	}
-	return &exitErr{code: ExitExternal, err: err}
+	return mapUnclassifiedError(err)
 }

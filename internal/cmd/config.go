@@ -32,7 +32,7 @@ $XDG_CONFIG_HOME/arat/config.toml, $HOME/.config/arat/config.toml.
 		Example: "  arat config init\n  arat config init --force",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path, err := config.ResolvePath(*s.configPath)
+			path, err := config.ResolvePath(s.configPath)
 			if err != nil {
 				return &exitErr{code: ExitConfig, err: err}
 			}
@@ -57,7 +57,7 @@ func newConfigPathCmd(s *state) *cobra.Command {
 		Short: "Print the resolved config path",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			path, err := config.ResolvePath(*s.configPath)
+			path, err := config.ResolvePath(s.configPath)
 			if err != nil {
 				return &exitErr{code: ExitConfig, err: err}
 			}

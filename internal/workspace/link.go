@@ -33,6 +33,9 @@ func (s *Service) LinkLinear(ctx context.Context, opts LinkOptions) (*Workspace,
 	if err != nil {
 		return nil, err
 	}
+	if err := errIfMetaBroken(ws); err != nil {
+		return nil, err
+	}
 	if !ws.IsProject() {
 		return nil, fmt.Errorf("%w: %s is a task workspace — it attaches to an issue (`arat attach <ticket>`), not to a Linear project", ErrInvalidInput, ws.Ref)
 	}
@@ -51,6 +54,9 @@ func (s *Service) LinkLinear(ctx context.Context, opts LinkOptions) (*Workspace,
 func (s *Service) UnlinkLinear(ctx context.Context, ref string) (*Workspace, error) {
 	ws, err := s.Get(ctx, ref)
 	if err != nil {
+		return nil, err
+	}
+	if err := errIfMetaBroken(ws); err != nil {
 		return nil, err
 	}
 	if !ws.IsProject() {

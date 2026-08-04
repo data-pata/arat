@@ -15,18 +15,9 @@ type AttachOptions struct {
 	Ticket string // ticket id (lowercase, must match TicketRE)
 }
 
-// AttachTicket attaches a ticket to an existing ticketless workspace.
-// It renames the branches in each worktree, moves the workspace directory,
-// repairs the worktree pointers in each canonical repo, and updates
-// CLAUDE.md to reference the ticket.
-//
-// Returns the updated Workspace (with new Name/Path/Ticket/TicketURL).
-//
-// Errors:
-//   - ErrNotFound: the workspace doesn't exist
-//   - ErrAlreadyExists: a workspace with the new name already exists
-//   - ErrPrecondition: the workspace is already ticketed (use a different
-//     workflow if the user wants to re-ticket)
+// AttachWarning is one non-fatal problem AttachTicket hit and worked
+// around, e.g. a worktree that had moved off the original branch and was
+// left as-is.
 type AttachWarning struct {
 	Repo   string
 	Branch string
@@ -42,7 +33,18 @@ type AttachResult struct {
 	SessionWarnings []SessionMoveWarning
 }
 
-// AttachTicket performs the rename/repair/edit. See type docs above.
+// AttachTicket attaches a ticket to an existing ticketless workspace. It
+// renames the branches in each worktree, moves the workspace directory,
+// repairs the worktree pointers in each canonical repo, and updates
+// CLAUDE.md to reference the ticket.
+//
+// Returns the updated Workspace (with new Name/Path/Ticket/TicketURL).
+//
+// Errors:
+//   - ErrNotFound: the workspace doesn't exist
+//   - ErrAlreadyExists: a workspace with the new name already exists
+//   - ErrPrecondition: the workspace is already ticketed (use a different
+//     workflow if the user wants to re-ticket)
 func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*AttachResult, error) {
 	if opts.Ticket == "" {
 		return nil, fmt.Errorf("%w: ticket is required", ErrInvalidInput)
@@ -53,6 +55,9 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 
 	current, err := s.Get(ctx, opts.Name)
 	if err != nil {
+		return nil, err
+	}
+	if err := errIfMetaBroken(current); err != nil {
 		return nil, err
 	}
 	if current.IsProject() {
@@ -72,7 +77,7 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 	newPath := filepath.Join(filepath.Dir(current.Path), newDirName)
 
 	if newDirName == current.Name {
-		return nil, fmt.Errorf("workspace %s already has the target name", current.Name)
+		return nil, fmt.Errorf("%w: workspace %s already has the target name", ErrAlreadyExists, current.Name)
 	}
 	if _, err := os.Stat(newPath); err == nil {
 		return nil, fmt.Errorf("%w: %s", ErrAlreadyExists, newDirName)
@@ -102,6 +107,15 @@ func (s *Service) AttachTicket(ctx context.Context, opts AttachOptions) (*Attach
 	// 2. Move the workspace directory.
 	if err := os.Rename(current.Path, newPath); err != nil {
 		return nil, fmt.Errorf("rename %s → %s: %w", current.Path, newPath, err)
+	}
+
+	// 2b. Rename the generated .code-workspace, which is keyed by the
+	// directory name. Left under the old name, `repo add` would look for the
+	// new one, find nothing, and silently stop regenerating it.
+	if oldCW := filepath.Join(newPath, current.Name+".code-workspace"); fileOrDirExists(oldCW) {
+		if err := os.Rename(oldCW, filepath.Join(newPath, newDirName+".code-workspace")); err != nil {
+			warnings = append(warnings, AttachWarning{Reason: "code-workspace rename failed: " + err.Error()})
+		}
 	}
 
 	// 3. Repair worktree registrations in each canonical repo so `git

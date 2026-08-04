@@ -1,9 +1,12 @@
 package workspace
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -27,8 +30,8 @@ func renderClaudeMD(opts NewOptions, repos []string, branch, ticketURL string, n
 	if opts.CarryFrom != nil && opts.CarryFrom.ParentName != "" {
 		c := opts.CarryFrom
 		ref := "`" + c.ParentName + "`"
-		if c.ParentTicket != "" && c.ParentTicketURL != "" {
-			ref = fmt.Sprintf("`%s` ([%s](%s))", c.ParentName, strings.ToUpper(c.ParentTicket), c.ParentTicketURL)
+		if c.ParentTicket != "" && ticketURL != "" {
+			ref = fmt.Sprintf("`%s` ([%s](%s))", c.ParentName, strings.ToUpper(c.ParentTicket), renderTicketURL(ticketURL, c.ParentTicket))
 		}
 		carry = fmt.Sprintf("Spun off from %s.\n\n", ref)
 	}
@@ -109,4 +112,67 @@ func writeClaudeWorkspace(workspaceDir string) error {
 		return fmt.Errorf("mkdir claude_workspace: %w", err)
 	}
 	return os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*\n!.gitignore\n"), 0o644)
+}
+
+// updateClaudeMDRepos rewrites the generated "**Repos**:" line of a
+// workspace's CLAUDE.md to the given list. The file is the context Claude
+// actually reads, so a repo added after creation has to show up there — a
+// stale list misinforms the one consumer the file exists for. A missing file
+// or a header the user rewrote without the line is nothing to update, not an
+// error.
+func updateClaudeMDRepos(workspaceDir string, repos []string) error {
+	path := filepath.Join(workspaceDir, "CLAUDE.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, ln := range lines {
+		if strings.HasPrefix(ln, "**Repos**:") {
+			lines[i] = "**Repos**: " + strings.Join(repos, " ")
+			return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644)
+		}
+	}
+	return nil
+}
+
+// scratchFiles lists the files inside a workspace's claude_workspace/ scratch
+// dir as slash-separated paths relative to that dir, sorted. The generated
+// top-level .gitignore is excluded: it is arat's own artifact, so a scratch
+// dir holding nothing else counts as empty. A missing scratch dir yields nil.
+//
+// This feeds Remove's scratch precondition: the content is by contract where
+// notes meant to outlive the code go, yet it is ignored by git, so removal is
+// the one operation that can destroy it with no recovery path.
+func scratchFiles(workspaceDir string) ([]string, error) {
+	root := filepath.Join(workspaceDir, claudeWorkspaceDir)
+	var out []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if path == root && errors.Is(walkErr, fs.ErrNotExist) {
+				return fs.SkipAll
+			}
+			return walkErr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if rel == ".gitignore" {
+			return nil
+		}
+		out = append(out, filepath.ToSlash(rel))
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", root, err)
+	}
+	sort.Strings(out)
+	return out, nil
 }

@@ -4,12 +4,41 @@ package git
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
+
+// ErrCmd is matched (errors.Is) by every error a failed git subprocess
+// returns from this package. Callers use it to classify a failure as "the
+// external tool failed" — arat's exit 6 — without string matching; an error
+// not carrying it is arat's own.
+var ErrCmd = errors.New("git command failed")
+
+// cmdError carries the rendered message while matching both ErrCmd and the
+// underlying exec error via the multi-error Unwrap.
+type cmdError struct {
+	msg string
+	err error
+}
+
+func (e *cmdError) Error() string { return e.msg }
+func (e *cmdError) Unwrap() []error {
+	if e.err == nil {
+		return []error{ErrCmd}
+	}
+	return []error{ErrCmd, e.err}
+}
+
+// cmdErrorf wraps a failed subprocess's error with a printf-rendered message.
+func cmdErrorf(err error, format string, args ...any) error {
+	return &cmdError{msg: fmt.Sprintf(format, args...), err: err}
+}
 
 // Runner runs an external command and returns combined stdout+stderr.
 type Runner func(ctx context.Context, dir, name string, args ...string) (stdout []byte, stderr []byte, err error)
@@ -20,8 +49,49 @@ type Git struct{ run Runner }
 // New returns a Git that shells out to the real `git` binary.
 func New() *Git { return &Git{run: execRunner} }
 
+// NewWithTimeout is New with a deadline on every subprocess. Zero d means no
+// deadline. The bound is per git invocation, not per arat command: a
+// multi-repo `arat new` runs many fetches, each entitled to the full budget.
+func NewWithTimeout(d time.Duration) *Git { return &Git{run: timeoutRunner(execRunner, d)} }
+
+// NewTraced is NewWithTimeout with a one-line trace per subprocess written
+// to w: argv, directory, duration, and the failure if any. Everything arat
+// does is a git subprocess, so this is the switch for "which commands ran
+// and what did each cost" (wired from the ARAT_TRACE env var).
+func NewTraced(d time.Duration, w io.Writer) *Git {
+	return &Git{run: traceRunner(timeoutRunner(execRunner, d), w)}
+}
+
 // NewWithRunner returns a Git using the given Runner. Used by tests.
 func NewWithRunner(r Runner) *Git { return &Git{run: r} }
+
+// timeoutRunner bounds each invocation of r with its own deadline.
+func timeoutRunner(r Runner, d time.Duration) Runner {
+	if d <= 0 {
+		return r
+	}
+	return func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, d)
+		defer cancel()
+		return r(ctx, dir, name, args...)
+	}
+}
+
+// traceRunner logs each invocation of r to w after it completes. Wrapped
+// outside the timeout so the logged duration includes a deadline kill.
+func traceRunner(r Runner, w io.Writer) Runner {
+	return func(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
+		start := time.Now()
+		stdout, stderr, err := r(ctx, dir, name, args...)
+		status := "ok"
+		if err != nil {
+			status = err.Error()
+		}
+		fmt.Fprintf(w, "trace: %s %s (in %s) %s [%s]\n",
+			name, strings.Join(args, " "), dir, time.Since(start).Round(time.Millisecond), status)
+		return stdout, stderr, err
+	}
+}
 
 func execRunner(ctx context.Context, dir, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -212,7 +282,7 @@ func (g *Git) CanonicalRepoPath(ctx context.Context, dir string) string {
 func (g *Git) Fetch(ctx context.Context, dir string) error {
 	_, errOut, err := g.run(ctx, dir, "git", "fetch", "origin")
 	if err != nil {
-		return fmt.Errorf("git fetch origin (in %s): %w: %s", dir, err, strings.TrimSpace(string(errOut)))
+		return cmdErrorf(err, "git fetch origin (in %s): %s: %v", dir, strings.TrimSpace(string(errOut)), err)
 	}
 	return nil
 }
@@ -222,7 +292,7 @@ func (g *Git) Fetch(ctx context.Context, dir string) error {
 func (g *Git) WorktreeAdd(ctx context.Context, repoDir, branch, target, base string) error {
 	_, errOut, err := g.run(ctx, repoDir, "git", "worktree", "add", "-b", branch, target, base)
 	if err != nil {
-		return fmt.Errorf("git worktree add (in %s, base %s): %w: %s", repoDir, base, err, strings.TrimSpace(string(errOut)))
+		return cmdErrorf(err, "git worktree add (in %s, base %s): %s: %v", repoDir, base, strings.TrimSpace(string(errOut)), err)
 	}
 	return nil
 }
@@ -236,7 +306,7 @@ func (g *Git) WorktreeRemove(ctx context.Context, repoDir, target string, force 
 	args = append(args, target)
 	_, errOut, err := g.run(ctx, repoDir, "git", args...)
 	if err != nil {
-		return fmt.Errorf("git worktree remove (in %s): %w: %s", repoDir, err, strings.TrimSpace(string(errOut)))
+		return cmdErrorf(err, "git worktree remove (in %s): %s: %v", repoDir, strings.TrimSpace(string(errOut)), err)
 	}
 	return nil
 }
@@ -249,7 +319,7 @@ func (g *Git) BranchRename(ctx context.Context, repoDir, from, to string) error 
 	}
 	_, errOut, err := g.run(ctx, repoDir, "git", "branch", "-m", from, to)
 	if err != nil {
-		return fmt.Errorf("git branch -m %s %s (in %s): %w: %s", from, to, repoDir, err, strings.TrimSpace(string(errOut)))
+		return cmdErrorf(err, "git branch -m %s %s (in %s): %s: %v", from, to, repoDir, strings.TrimSpace(string(errOut)), err)
 	}
 	return nil
 }
@@ -266,7 +336,20 @@ func (g *Git) WorktreeRepair(ctx context.Context, repoDir string, worktreePaths 
 	args := append([]string{"worktree", "repair"}, worktreePaths...)
 	_, errOut, err := g.run(ctx, repoDir, "git", args...)
 	if err != nil {
-		return fmt.Errorf("git worktree repair (in %s): %w: %s", repoDir, err, strings.TrimSpace(string(errOut)))
+		return cmdErrorf(err, "git worktree repair (in %s): %s: %v", repoDir, strings.TrimSpace(string(errOut)), err)
+	}
+	return nil
+}
+
+// WorktreePrune runs `git worktree prune` in repoDir, clearing registrations
+// whose directories no longer exist. Used by failure cleanup: a worktree add
+// killed mid-flight (cancellation, crash) can leave a registration that
+// `git worktree remove` no longer matches, and prune is the only git verb
+// that clears those.
+func (g *Git) WorktreePrune(ctx context.Context, repoDir string) error {
+	_, errOut, err := g.run(ctx, repoDir, "git", "worktree", "prune")
+	if err != nil {
+		return cmdErrorf(err, "git worktree prune (in %s): %s: %v", repoDir, strings.TrimSpace(string(errOut)), err)
 	}
 	return nil
 }
@@ -285,7 +368,7 @@ func (g *Git) BranchDelete(ctx context.Context, repoDir, branch string, force bo
 	}
 	_, errOut, err := g.run(ctx, repoDir, "git", "branch", flag, branch)
 	if err != nil {
-		return fmt.Errorf("git branch %s %s (in %s): %w: %s", flag, branch, repoDir, err, strings.TrimSpace(string(errOut)))
+		return cmdErrorf(err, "git branch %s %s (in %s): %s: %v", flag, branch, repoDir, strings.TrimSpace(string(errOut)), err)
 	}
 	return nil
 }

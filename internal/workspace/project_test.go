@@ -115,7 +115,7 @@ func TestService_List_nestedTree(t *testing.T) {
 	}
 	svc := projectSvc(t, wsDir, insp)
 
-	items, err := svc.List(context.Background())
+	items, err := svc.List(context.Background(), ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, items, 2, "only top-level workspaces are returned")
 
@@ -335,7 +335,7 @@ func TestService_List_nestedTasks(t *testing.T) {
 	}})
 	ctx := context.Background()
 
-	items, err := svc.List(ctx)
+	items, err := svc.List(ctx, ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 

@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -273,4 +274,48 @@ func TestInspectFast(t *testing.T) {
 	branch, canon = g.InspectFast(t.TempDir())
 	assert.Empty(t, branch)
 	assert.Empty(t, canon)
+}
+
+func TestSubprocessFailuresCarryErrCmd(t *testing.T) {
+	// The cmd layer maps ErrCmd to the external-tool exit code, so every
+	// failing subprocess wrapper must carry it — and keep the underlying
+	// error reachable for errors.Is.
+	underlying := exec.ErrNotFound
+	g := NewWithRunner(func(context.Context, string, string, ...string) ([]byte, []byte, error) {
+		return nil, []byte("boom"), underlying
+	})
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{"Fetch", func() error { return g.Fetch(ctx, "/r") }},
+		{"WorktreeAdd", func() error { return g.WorktreeAdd(ctx, "/r", "b", "/t", "base") }},
+		{"WorktreeRemove", func() error { return g.WorktreeRemove(ctx, "/r", "/t", false) }},
+		{"BranchRename", func() error { return g.BranchRename(ctx, "/r", "a", "b") }},
+		{"BranchDelete", func() error { return g.BranchDelete(ctx, "/r", "b", true) }},
+		{"WorktreeRepair", func() error { return g.WorktreeRepair(ctx, "/r", "/t") }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrCmd)
+			assert.ErrorIs(t, err, underlying, "the exec error must stay reachable")
+			assert.Contains(t, err.Error(), "boom", "stderr must stay in the message")
+		})
+	}
+}
+
+func TestTraceRunner_logsInvocation(t *testing.T) {
+	var buf bytes.Buffer
+	r := traceRunner(func(context.Context, string, string, ...string) ([]byte, []byte, error) {
+		return nil, nil, nil
+	}, &buf)
+	_, _, err := r(context.Background(), "/repo", "git", "fetch", "origin")
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "git fetch origin")
+	assert.Contains(t, buf.String(), "(in /repo)")
+	assert.Contains(t, buf.String(), "[ok]")
 }

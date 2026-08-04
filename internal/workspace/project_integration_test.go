@@ -95,7 +95,7 @@ func TestNew_insideProject_nestsButKeepsDefaultBase(t *testing.T) {
 	assert.NoFileExists(t, filepath.Join(child.Path, "repo-a", marker))
 
 	// The tree reflects the nesting.
-	items, err := svc.List(ctx)
+	items, err := svc.List(ctx, ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, items, 1)
 	require.Len(t, items[0].Children, 1)
@@ -574,7 +574,7 @@ func TestNew_refusesNestingBeyondDepthCap(t *testing.T) {
 	assert.Contains(t, err.Error(), "nesting deeper")
 
 	// Everything that was created is visible to the walk.
-	items, err := svc.List(ctx)
+	items, err := svc.List(ctx, ListOptions{})
 	require.NoError(t, err)
 	all := Flatten(items)
 	for _, ws := range all {
@@ -662,7 +662,7 @@ func TestListLight_branchesWithoutGitState(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(ws.Path, "repo-a", "dirty.txt"), []byte("x"), 0o644))
 
-	light, err := svc.ListLight(ctx)
+	light, err := svc.List(ctx, ListOptions{Detail: DetailLight})
 	require.NoError(t, err)
 	require.Len(t, light, 1)
 	require.Len(t, light[0].Repos, 1)
@@ -670,7 +670,7 @@ func TestListLight_branchesWithoutGitState(t *testing.T) {
 	assert.Equal(t, "ps--feat--abc-1", light[0].Repos[0].Branch)
 	assert.False(t, light[0].Repos[0].Dirty, "light mode does not run git, so state is unavailable")
 
-	full, err := svc.List(ctx)
+	full, err := svc.List(ctx, ListOptions{})
 	require.NoError(t, err)
 	assert.True(t, full[0].Repos[0].Dirty, "full mode sees the same tree as dirty")
 }

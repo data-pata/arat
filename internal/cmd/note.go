@@ -37,7 +37,10 @@ several positional args; they're joined with single spaces.
 				return &exitErr{code: ExitUsage, err: errors.New("linear is disabled in config (set [linear] enabled = true)")}
 			}
 
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 			ref, body, err := splitNoteArgs(cmd.Context(), args, svc, s.deps.Cwd)
 			if err != nil {
 				return &exitErr{code: ExitUsage, err: err}
@@ -55,13 +58,13 @@ several positional args; they're joined with single spaces.
 				case errors.As(err, &ambiguous):
 					return &exitErr{code: ExitUsage, err: err}
 				}
-				return &exitErr{code: ExitExternal, err: err}
+				return mapUnclassifiedError(err)
 			}
 			if ws.Ticket == "" {
 				return &exitErr{code: ExitPrecondition, err: fmt.Errorf("workspace %s has no ticket attached; nothing to comment on", ws.Ref)}
 			}
 
-			lc := s.deps.NewLinear()
+			lc := s.deps.NewLinear(cfg)
 			if err := lc.Available(cmd.Context()); err != nil {
 				return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 			}

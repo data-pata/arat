@@ -19,7 +19,7 @@ func TestNew_projectFlag(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing", Path: "/p", Kind: workspace.KindProject}}
 	r := run(t, []string{"new", "q3-billing", "--project"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, workspace.KindProject, svc.newCalls[0].Kind)
 	assert.Empty(t, svc.newCalls[0].Ticket)
@@ -50,7 +50,7 @@ func TestNew_inFlagSetsParent(t *testing.T) {
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "q3-billing", svc.newCalls[0].Parent)
 }
@@ -65,7 +65,7 @@ func TestNew_inFlagAcceptsTaskWorkspace(t *testing.T) {
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--in", "abc-1--leaf"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "abc-1--leaf", svc.newCalls[0].Parent)
 }
@@ -81,7 +81,7 @@ func TestNew_inDotUsesWorkspaceAtCwd(t *testing.T) {
 	cwdFn := func() (string, error) { return "/ws/q3/abc-1--leaf/repo-a", nil }
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--in", "."}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "q3/abc-1--leaf", svc.newCalls[0].Parent)
 	assert.Empty(t, svc.projectAtCalls, "--in . must not fall back to project inference")
@@ -116,7 +116,7 @@ func TestNew_projectIgnoresCwdInference(t *testing.T) {
 	cwdFn := func() (string, error) { return "/ws/q3-billing/somewhere", nil }
 	r := runWithDeps(t, []string{"new", "q4", "--project"}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Empty(t, svc.newCalls[0].Parent)
 	assert.Empty(t, svc.projectAtCalls)
@@ -139,7 +139,7 @@ func TestNew_parentInferredFromCwd(t *testing.T) {
 	cwdFn := func() (string, error) { return "/ws/feat/q3-billing/somewhere", nil }
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "q3-billing", svc.newCalls[0].Parent)
 	assert.Equal(t, []string{"/ws/feat/q3-billing/somewhere"}, svc.projectAtCalls)
@@ -152,7 +152,7 @@ func TestNew_outsideAnyProjectStaysTopLevel(t *testing.T) {
 	cwdFn := func() (string, error) { return "/somewhere/else", nil }
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Empty(t, svc.newCalls[0].Parent)
 }
@@ -166,7 +166,7 @@ func TestNew_nestingAloneDoesNotInheritBranches(t *testing.T) {
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.False(t, svc.newCalls[0].InheritParentBranches)
 }
@@ -180,7 +180,7 @@ func TestNew_fromParentSetsInheritance(t *testing.T) {
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--in", "q3-billing", "--from-parent"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.True(t, svc.newCalls[0].InheritParentBranches)
 }
@@ -193,7 +193,7 @@ func TestNew_fromParentInfersParentFromCwd(t *testing.T) {
 	cwdFn := func() (string, error) { return "/ws/q3-billing/somewhere", nil }
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--from-parent"}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "q3-billing", svc.newCalls[0].Parent)
 	assert.True(t, svc.newCalls[0].InheritParentBranches)
@@ -230,7 +230,7 @@ func TestNew_projectSkipsInteractiveRepoPicker(t *testing.T) {
 			return RepoFlowResult{}, nil
 		},
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Zero(t, svc.candidatesCalled)
 }
 
@@ -253,7 +253,7 @@ func TestLs_tree(t *testing.T) {
 	}}
 	r := run(t, []string{"ls"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, "── q3-billing ── (project)")
 	assert.Contains(t, r.stdout, "linear project: Q3 Billing (https://linear.app/o/project/slug)")
 	assert.Contains(t, r.stdout, "  core-api → ps--q3-billing")
@@ -268,7 +268,7 @@ func TestLs_emptyProject(t *testing.T) {
 	}}
 	r := run(t, []string{"ls"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, "(no workspaces yet)")
 	assert.NotContains(t, r.stdout, "(no worktrees)", "a project without worktrees is normal, not noteworthy")
 }
@@ -296,7 +296,7 @@ func TestLs_flat(t *testing.T) {
 	}}
 	r := run(t, []string{"ls", "--flat"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	// Every workspace appears at column zero, headed by its full ref.
 	assert.Contains(t, r.stdout, "── q3-billing ── (project)")
 	assert.Contains(t, r.stdout, "\n── q3-billing/abc-12--invoice ──")
@@ -316,7 +316,7 @@ func TestLs_flatJSON(t *testing.T) {
 	}}
 	r := run(t, []string{"ls", "--flat", "--json"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	var got []map[string]any
 	require.NoError(t, json.Unmarshal([]byte(r.stdout), &got))
 	require.Len(t, got, 2, "flat JSON lists every workspace exactly once")
@@ -340,7 +340,7 @@ func TestRepoAdd_recursiveFlagAndReporting(t *testing.T) {
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "q3-billing", "--recursive", "ui-app"}, nil, svc, depsOpts{cwd: failingCwd(t)})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.addReposCalls, 1)
 	assert.True(t, svc.addReposCalls[0].Recursive)
 	// Every added worktree path lands on stdout for scripting.
@@ -356,7 +356,7 @@ func TestRm_recursiveFlag(t *testing.T) {
 	svc := &fakeService{}
 	r := run(t, []string{"rm", "q3-billing", "--recursive"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
 	assert.True(t, svc.removeCalls[0].Recursive)
 }
@@ -391,7 +391,7 @@ func TestRm_pickerPromptNamesNestedCount(t *testing.T) {
 		confirm: func(p string) (bool, error) { prompt = p; return false, nil },
 	})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, prompt, "Remove project \"q3-billing\" and the 2 workspaces nested in it?")
 	assert.Empty(t, svc.removeCalls, "declining the prompt removes nothing")
 }
@@ -408,7 +408,7 @@ func TestProjectLink_byName(t *testing.T) {
 	}}
 	r := runWithDeps(t, []string{"project", "link", "q3-billing", "--project", "Q3 Billing"}, nil, svc, depsOpts{linear: lc})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"project"}, lc.containerCalls)
 	require.Len(t, svc.linkCalls, 1)
 	assert.Equal(t, "q3-billing", svc.linkCalls[0].Ref)
@@ -424,7 +424,7 @@ func TestProjectLink_bySlugIsCaseSensitiveAndWinsOverName(t *testing.T) {
 	}}
 	r := runWithDeps(t, []string{"project", "link", "p", "--initiative", "abc123"}, nil, svc, depsOpts{linear: lc})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"initiative"}, lc.containerCalls)
 	require.Len(t, svc.linkCalls, 1)
 	assert.Equal(t, "abc123", svc.linkCalls[0].Linear.ID)
@@ -496,7 +496,7 @@ func TestProjectLink_interactivePicker(t *testing.T) {
 	r := runWithDeps(t, []string{"project", "link", "q3-billing"}, nil, svc,
 		depsOpts{linear: lc, isTTY: func() bool { return true }, pickContainer: pick})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"project", "initiative"}, lc.containerCalls, "both kinds are offered")
 	// Projects first (sorted), then initiatives.
 	require.Len(t, offered, 3)
@@ -553,7 +553,7 @@ func TestProjectUnlink(t *testing.T) {
 	svc := &fakeService{unlinkResult: &workspace.Workspace{Name: "q3-billing", Ref: "q3-billing", Path: "/p", Kind: workspace.KindProject}}
 	r := run(t, []string{"project", "unlink", "q3-billing"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"q3-billing"}, svc.unlinkCalls)
 	assert.Contains(t, r.stderr, "unlinked q3-billing")
 }
@@ -564,18 +564,18 @@ func TestLs_defaultIsLight(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "x", Ref: "x"}}}
 	r := run(t, []string{"ls"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
-	assert.Equal(t, 1, svc.listLightCalls, "plain ls must use the no-git listing")
-	assert.Equal(t, 0, svc.listCalls)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	require.Len(t, svc.listCalls, 1)
+	assert.Equal(t, workspace.DetailLight, svc.listCalls[0].Detail, "plain ls must use the no-git listing")
 }
 
 func TestLs_statusFlagUsesFullInspection(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "x", Ref: "x"}}}
 	r := run(t, []string{"ls", "--status"}, nil, svc)
 
-	assert.Equal(t, 0, r.exit, r.stderr)
-	assert.Equal(t, 1, svc.listCalls)
-	assert.Equal(t, 0, svc.listLightCalls)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	require.Len(t, svc.listCalls, 1)
+	assert.Equal(t, workspace.DetailFull, svc.listCalls[0].Detail)
 }
 
 // A wrong invocation must show what right looks like, not just name the
@@ -606,7 +606,7 @@ func TestProjectLink_refInferredFromCwd(t *testing.T) {
 	r := runWithDeps(t, []string{"project", "link", "--project", "slug-1"}, nil, svc,
 		depsOpts{linear: lc, cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.linkCalls, 1)
 	assert.Equal(t, "lidl", svc.linkCalls[0].Ref)
 	assert.Equal(t, []string{"/ws/lidl/somewhere"}, svc.projectAtCalls)
@@ -634,7 +634,7 @@ func TestProjectUnlink_refInferredFromCwd(t *testing.T) {
 	cwdFn := func() (string, error) { return "/ws/lidl", nil }
 	r := runWithDeps(t, []string{"project", "unlink"}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"lidl"}, svc.unlinkCalls)
 }
 
@@ -648,7 +648,7 @@ func TestTicketAttach_workspaceInferredFromCwd(t *testing.T) {
 	cwdFn := func() (string, error) { return "/ws/q3/myfeat/repo-a", nil }
 	r := runWithDeps(t, []string{"ticket", "attach", "ABC-1"}, nil, svc, depsOpts{cwd: cwdFn})
 
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.attachCalls, 1)
 	assert.Equal(t, "q3/myfeat", svc.attachCalls[0].Name)
 	assert.Equal(t, "abc-1", svc.attachCalls[0].Ticket)

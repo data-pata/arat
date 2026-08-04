@@ -1,7 +1,10 @@
 package workspace
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -102,6 +105,8 @@ func (s *Service) MoveSessionsForRename(oldPath, newPath string) []SessionMoveWa
 // Returns (sourcePath, destPath, nil) on success.
 // Returns ErrNotFound if the session isn't found anywhere under
 // ClaudeProjectsDir, ErrAlreadyExists if the destination already exists.
+// ctx is unused — the work is pure os calls — but kept so the method sits in
+// the same shape as every other Service operation on the cmd interface.
 func (s *Service) MoveSessionFile(ctx context.Context, sessionID, targetWorkspacePath string) (srcPath, dstPath string, err error) {
 	if s.ClaudeProjectsDir == "" {
 		return "", "", fmt.Errorf("%w: ClaudeProjectsDir not configured", ErrInvalidInput)
@@ -137,6 +142,105 @@ func (s *Service) MoveSessionFile(ctx context.Context, sessionID, targetWorkspac
 	// Tidy: if the source dir is now empty, drop it. Ignore failures.
 	_ = os.Remove(filepath.Dir(src))
 	return src, dst, nil
+}
+
+// ForkSessionFile copies a session jsonl (identified by sessionID) into the
+// project dir matching targetWorkspacePath under a freshly generated session
+// id, rewriting every embedded occurrence of the old id to the new one. That
+// is the transformation `claude --fork-session` applies to the lines it
+// copies, and a transcript resumed under the new id picks up the full
+// conversation. The source file is read, never written or removed, so forking
+// a session that is still running is safe: the original keeps its id and its
+// place, the copy continues independently inside the workspace. Used by
+// `arat new --fork-session`.
+//
+// Returns (sourcePath, destPath, newSessionID, nil) on success.
+// Returns ErrNotFound if the session isn't found anywhere under
+// ClaudeProjectsDir.
+// ctx is unused (the work is pure os calls) but kept so the method sits in
+// the same shape as every other Service operation on the cmd interface.
+func (s *Service) ForkSessionFile(ctx context.Context, sessionID, targetWorkspacePath string) (srcPath, dstPath, newID string, err error) {
+	if s.ClaudeProjectsDir == "" {
+		return "", "", "", fmt.Errorf("%w: ClaudeProjectsDir not configured", ErrInvalidInput)
+	}
+	if sessionID == "" {
+		return "", "", "", fmt.Errorf("%w: session id is required", ErrInvalidInput)
+	}
+
+	src, err := findSessionFile(s.ClaudeProjectsDir, sessionID+".jsonl")
+	if err != nil {
+		return "", "", "", err
+	}
+	newID, err = newSessionID()
+	if err != nil {
+		return src, "", "", err
+	}
+
+	targetDir := filepath.Join(s.ClaudeProjectsDir, EncodeCwdAsProjectDir(targetWorkspacePath))
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return src, "", "", fmt.Errorf("mkdir %s: %w", targetDir, err)
+	}
+	dst := filepath.Join(targetDir, newID+".jsonl")
+	if err := copyWithIDRewrite(src, dst, sessionID, newID); err != nil {
+		return src, dst, "", err
+	}
+	return src, dst, newID, nil
+}
+
+// newSessionID returns a random UUIDv4, the format Claude Code uses for
+// session ids.
+func newSessionID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate session id: %w", err)
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// copyWithIDRewrite writes src to dst with every occurrence of oldID replaced
+// by newID. Line by line: transcripts can be large, and ids never span lines.
+func copyWithIDRewrite(src, dst, oldID, newID string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", src, err)
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create %s: %w", dst, err)
+	}
+	fail := func(step string, cause error) error {
+		out.Close()
+		_ = os.Remove(dst)
+		return fmt.Errorf("%s: %w", step, cause)
+	}
+	w := bufio.NewWriter(out)
+	r := bufio.NewReader(in)
+	oldB, newB := []byte(oldID), []byte(newID)
+	for {
+		line, readErr := r.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, err := w.Write(bytes.ReplaceAll(line, oldB, newB)); err != nil {
+				return fail("write "+dst, err)
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return fail("read "+src, readErr)
+		}
+	}
+	if err := w.Flush(); err != nil {
+		return fail("write "+dst, err)
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(dst)
+		return fmt.Errorf("close %s: %w", dst, err)
+	}
+	return nil
 }
 
 // findSessionFile searches one level under root for a dir containing

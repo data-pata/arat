@@ -556,7 +556,6 @@ func TestNew_carryContext(t *testing.T) {
 			ParentName:      "abc-1--parent",
 			ParentShortName: "parent",
 			ParentTicket:    "abc-1",
-			ParentTicketURL: "https://linear.app/x/issue/ABC-1",
 		},
 	})
 	require.NoError(t, err)

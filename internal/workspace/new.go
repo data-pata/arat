@@ -86,12 +86,13 @@ type NewOptions struct {
 }
 
 // CarryContext is the parent-workspace info copied forward when --carry-context
-// is set on `arat new`.
+// is set on `arat new`. Only the ticket id is carried; the URL is rendered
+// from the service's TicketURL template at write time, so the two can never
+// drift apart.
 type CarryContext struct {
 	ParentName      string // e.g. "abc-123--postal-fix"
 	ParentShortName string // e.g. "postal-fix"
 	ParentTicket    string // optional, lowercase
-	ParentTicketURL string // optional fully-rendered URL
 }
 
 // shortNameRE constrains workspace short names. Lowercase letters, digits,
@@ -135,8 +136,10 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 	if err := os.MkdirAll(full, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", full, err)
 	}
-	// On any failure after this point, clean up the partially-created workspace.
-	cleanup := func() { _ = os.RemoveAll(full) }
+	// Failures before any git work only need the directory gone. Once the
+	// per-repo jobs start, failure cleanup is unwindCreated below instead:
+	// by then there is git state to reverse, not just a directory.
+	cleanupDir := func() { _ = os.RemoveAll(full) }
 
 	base := s.Base
 	if base == "" {
@@ -152,13 +155,70 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 	for _, repo := range repos {
 		canonical := filepath.Join(s.Root, repo)
 		if !dirExists(canonical) {
-			cleanup()
+			cleanupDir()
 			return nil, fmt.Errorf("%w: canonical repo %s not found at %s", ErrNotFound, repo, canonical)
 		}
 		if s.Git.BranchExists(ctx, canonical, branch) {
-			cleanup()
-			return nil, fmt.Errorf("%w: branch %s already exists in %s — used by another workspace, or left behind by one removed with --keep-branches; pick a different name or delete the branch", ErrAlreadyExists, branch, repo)
+			cleanupDir()
+			return nil, fmt.Errorf("%w: branch %s already exists in %s — used by another workspace, or left behind by one removed with --keep-branches; pick a different name or delete the branch (if git refuses because a worktree uses it, run `git worktree prune` in that repo first)", ErrAlreadyExists, branch, repo)
 		}
+	}
+
+	// completed records the repos whose worktree add finished, so a failed
+	// New can tell state it must report if unwinding fails from repos that
+	// never got that far. Mutex-guarded: the errgroup writes concurrently.
+	var (
+		completedMu sync.Mutex
+		completed   = map[string]bool{}
+	)
+
+	// unwindCreated reverses what the per-repo jobs created — each worktree
+	// removed from its canonical repo, the branch deleted, stale
+	// registrations pruned — and then deletes the workspace directory.
+	// Without the git unwind, a partial New leaves a branch and a worktree
+	// registration in every canonical clone that got that far, and retrying
+	// the identical command trips the branch-collision pre-flight with state
+	// only `git worktree prune` plus `git branch -D` per repo could clear.
+	//
+	// It sweeps every repo in the set, not just the completed ones: a job
+	// killed mid-add (Ctrl-C) can leave a branch or a registration behind
+	// without ever reporting success. That is safe because the pre-flight
+	// above proved no repo carried the branch beforehand, so anything
+	// matching it now was created by this call. It runs on a context
+	// detached from ctx — by the time cleanup runs, ctx is typically
+	// already cancelled, and a cancelled cleanup is no cleanup at all.
+	// Unwind failures on completed repos ride along on the returned error;
+	// on never-completed repos they are the expected "nothing there" noise.
+	unwindCreated := func(cause error) error {
+		cctx := context.WithoutCancel(ctx)
+		var leftovers []string
+		for i := len(repos) - 1; i >= 0; i-- {
+			repo := repos[i]
+			canonical := filepath.Join(s.Root, repo)
+			target := filepath.Join(full, repo)
+			progressf(opts.Progress, "cleaning up %s…\n", repo)
+			wtErr := s.Git.WorktreeRemove(cctx, canonical, target, true)
+			// Prune before the branch delete: a registration whose
+			// directory died mid-add blocks the delete ("used by worktree")
+			// and only prune clears it.
+			_ = s.Git.WorktreePrune(cctx, canonical)
+			brErr := s.Git.BranchDelete(cctx, canonical, branch, true)
+			if completed[repo] { // safe unlocked: the errgroup is done
+				if wtErr != nil {
+					leftovers = append(leftovers, fmt.Sprintf("worktree %s: %v", target, wtErr))
+				}
+				if brErr != nil {
+					leftovers = append(leftovers, fmt.Sprintf("branch %s in %s: %v", branch, repo, brErr))
+				}
+			}
+		}
+		if err := os.RemoveAll(full); err != nil {
+			leftovers = append(leftovers, fmt.Sprintf("directory %s: %v", full, err))
+		}
+		if len(leftovers) > 0 {
+			return fmt.Errorf("%w\ncleanup could not undo everything — remove manually:\n  %s", cause, strings.Join(leftovers, "\n  "))
+		}
+		return cause
 	}
 
 	progress := newSyncWriter(opts.Progress)
@@ -184,34 +244,32 @@ func (s *Service) New(ctx context.Context, opts NewOptions) (*Workspace, error) 
 				}
 				return fmt.Errorf("worktree add for %s: %w", repo, err)
 			}
+			completedMu.Lock()
+			completed[repo] = true
+			completedMu.Unlock()
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		cleanup()
-		return nil, err
+		return nil, unwindCreated(err)
 	}
 
 	now := s.now()
 	if err := writeClaudeMD(full, opts, repos, branch, s.TicketURL, now); err != nil {
-		cleanup()
-		return nil, err
+		return nil, unwindCreated(err)
 	}
 	if err := writeClaudeWorkspace(full); err != nil {
-		cleanup()
-		return nil, err
+		return nil, unwindCreated(err)
 	}
 	// The marker file is what makes this directory addressable as a
 	// workspace when it sits inside a project, so it is written for every
 	// workspace arat creates, not only for projects.
 	if err := writeMeta(full, Meta{Kind: kindOrTask(opts.Kind)}); err != nil {
-		cleanup()
-		return nil, err
+		return nil, unwindCreated(err)
 	}
 	if s.GenerateCodeWorkspace || opts.GenerateCodeWorkspace {
 		if err := writeCodeWorkspace(full, dirName, repos); err != nil {
-			cleanup()
-			return nil, err
+			return nil, unwindCreated(err)
 		}
 	}
 
@@ -261,6 +319,9 @@ func (s *Service) resolveNewParent(ctx context.Context, opts NewOptions) (dir, r
 
 	parent, err := s.Get(ctx, opts.Parent)
 	if err != nil {
+		return "", "", nil, err
+	}
+	if err := errIfMetaBroken(parent); err != nil {
 		return "", "", nil, err
 	}
 	// A single-repo workspace's directory is itself a git worktree, so a
@@ -376,14 +437,18 @@ func (s *Service) now() time.Time {
 // (preserving config order), then glob matches sorted.
 func (s *Service) ResolveRepos(explicit []string) ([]string, error) {
 	if len(explicit) > 0 {
-		return explicit, nil
+		// Cloned so the caller's slice never aliases the one New iterates —
+		// a future in-place dedup here must not mutate the input.
+		return append([]string(nil), explicit...), nil
 	}
 	out, err := s.defaultPlusGlob()
 	if err != nil {
 		return nil, err
 	}
 	if len(out) == 0 {
-		return nil, errors.New("no repos resolved: configure default_repos or auto_repos_glob, or pass --repos")
+		// ErrInvalidInput so the CLI exits 2: the fix is in the caller's
+		// hands (a flag or a config edit), not in git's or linear's.
+		return nil, fmt.Errorf("%w: no repos resolved: configure default_repos or auto_repos_glob, or pass --repos", ErrInvalidInput)
 	}
 	return out, nil
 }

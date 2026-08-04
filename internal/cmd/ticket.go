@@ -56,7 +56,10 @@ those manually.
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 
 			var name, ticket string
 			if len(args) == 2 {
@@ -77,7 +80,12 @@ those manually.
 			if err != nil {
 				return mapAttachError(err)
 			}
-			fmt.Fprintf(s.deps.Stdout, "%s\n", res.Workspace.Path)
+			// Same output contract as its successor `arat attach`: the alias
+			// exists for script compatibility, so --json must behave
+			// identically on both.
+			s.writer().JSONRecord(res.Workspace, func(out io.Writer) {
+				fmt.Fprintf(out, "%s\n", res.Workspace.Path)
+			})
 			fmt.Fprintf(s.deps.Stderr, "attached %s → %s\n", strings.ToUpper(ticket), res.Workspace.Name)
 			for _, w := range res.Warnings {
 				fmt.Fprintf(s.deps.Stderr, "  ⚠ %s: %s\n", w.Repo, w.Reason)
@@ -106,7 +114,7 @@ func mapAttachError(err error) error {
 	case errors.Is(err, workspace.ErrInvalidInput):
 		return &exitErr{code: ExitUsage, err: err}
 	}
-	return &exitErr{code: ExitExternal, err: err}
+	return mapUnclassifiedError(err)
 }
 
 func newTicketCreateCmd(s *state) *cobra.Command {
@@ -148,7 +156,7 @@ piping into ` + "`arat new`" + `.
 			if !cfg.Linear.Enabled {
 				return &exitErr{code: ExitUsage, err: errors.New("linear is disabled in config (set [linear] enabled = true)")}
 			}
-			lc := s.deps.NewLinear()
+			lc := s.deps.NewLinear(cfg)
 			if err := lc.Available(cmd.Context()); err != nil {
 				return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w; install from https://github.com/schpet/linear-cli", err)}
 			}

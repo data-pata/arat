@@ -10,44 +10,61 @@ import (
 	"strings"
 
 	"github.com/data-pata/arat/internal/config"
+	"github.com/data-pata/arat/internal/git"
 	"github.com/data-pata/arat/internal/linear"
 	"github.com/data-pata/arat/internal/output"
+	"github.com/data-pata/arat/internal/tui"
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
+// ExitCode is arat's process exit code. Typed so an exitErr can only carry
+// one of the documented codes below, not an arbitrary integer.
+type ExitCode int
+
 // Exit codes (documented in `arat --help` and per-command help).
 const (
-	ExitOK           = 0
-	ExitGeneric      = 1
-	ExitUsage        = 2
-	ExitNotFound     = 3
-	ExitPrecondition = 4
-	ExitConflict     = 5
-	ExitExternal     = 6
-	ExitConfig       = 7
+	ExitOK           ExitCode = 0
+	ExitGeneric      ExitCode = 1
+	ExitUsage        ExitCode = 2
+	ExitNotFound     ExitCode = 3
+	ExitPrecondition ExitCode = 4
+	ExitConflict     ExitCode = 5
+	ExitExternal     ExitCode = 6
+	ExitConfig       ExitCode = 7
+	// ExitInterrupted follows the shell convention of 128+SIGINT for a run
+	// cut short by a signal. Cleanup has already run by the time it is
+	// returned — cancellation reaches the commands through their context.
+	ExitInterrupted ExitCode = 130
 )
 
 // Deps is the set of injected dependencies a command may need.
 // Real wiring happens in cmd/arat/main.go; tests inject fakes.
 type Deps struct {
-	Stdout        io.Writer
-	Stderr        io.Writer
-	NewConfig     func(path string) (*config.Config, error)
-	NewService    func(cfg *config.Config) Service
+	Stdout    io.Writer
+	Stderr    io.Writer
+	NewConfig func(path string) (*config.Config, error)
+	// NewService builds the workspace service for a loaded config. A
+	// returned error is mapped to the config exit code by state.service —
+	// construction can only fail on config-shaped problems (missing root,
+	// missing workspaces dir), and returning it keeps process exit out of
+	// the wiring layer.
+	NewService    func(cfg *config.Config) (Service, error)
 	PickWorkspace func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error)
 	// PickContainer is the interactive picker over Linear projects and
 	// initiatives, used by `arat attach` on a project workspace (and the
 	// legacy `arat project link`) when nothing was named. Returns nil (no
 	// error) when the user cancels.
 	PickContainer func(ctx context.Context, containers []linear.Container, out io.Writer) (*linear.Container, error)
-	NewLinear     func() LinearClient
-	Cwd           func() (string, error)
-	TicketFlow    TicketFlow
-	RepoFlow      RepoFlow
-	NameFlow      NameFlow
-	IsTTY         func() bool                       // returns whether stdin is a tty; defaults to false
-	Confirm       func(prompt string) (bool, error) // y/N prompt; returns true only on explicit yes
+	// NewLinear builds the Linear client. It takes the loaded config so the
+	// wiring can honour per-subprocess settings (command_timeout).
+	NewLinear  func(cfg *config.Config) LinearClient
+	Cwd        func() (string, error)
+	TicketFlow TicketFlow
+	RepoFlow   RepoFlow
+	NameFlow   NameFlow
+	IsTTY      func() bool                       // returns whether stdin is a tty; defaults to false
+	Confirm    func(prompt string) (bool, error) // y/N prompt; returns true only on explicit yes
 }
 
 // LinearClient is the surface Linear-driven commands need. Implemented by
@@ -71,32 +88,34 @@ type LinearClient interface {
 	ProjectCreate(ctx context.Context, opts linear.ProjectCreateOptions) (linear.Container, error)
 }
 
-// TicketFlowOptions parameterizes the interactive ticket flow per calling
-// command.
-type TicketFlowOptions struct {
-	Team string
-	// AllowSkip offers a "skip" choice: meaningful for `arat new` (create the
-	// workspace ticketless), absent for `arat attach` (skipping is just
-	// cancelling).
-	AllowSkip bool
+// The helpers below each consume a slice of LinearClient, declared here so
+// the function signature says which calls a helper can make — the wiring
+// still passes the full client, which satisfies all of them.
+
+// issueCreator is what createTicket needs: probe the binary, create issues.
+type issueCreator interface {
+	Available(ctx context.Context) error
+	IssueCreate(ctx context.Context, opts linear.IssueCreateOptions) (linear.IssueResult, error)
 }
 
-// TicketFlow is the interactive ticket-attachment flow. Returns either a
-// chosen ticket id (string) or empty (skip). Tests inject a fake; the real
-// impl lives in internal/tui.
-type TicketFlow func(ctx context.Context, lc linear.Reader, opts TicketFlowOptions, out io.Writer) (TicketFlowResult, error)
-
-// TicketFlowResult: a parallel of tui.TicketFlowResult, but lifted to the
-// cmd package so cmd code doesn't import tui directly.
-type TicketFlowResult struct {
-	Cancelled        bool
-	Skip             bool
-	Ticket           string // when non-empty, attach this existing ticket
-	TicketTitle      string // the picked ticket's title, for deriving a workspace name
-	TicketUnassigned bool   // the picked ticket had no assignee; cmd may offer to self-assign
-	NewTitle         string // when non-empty, cmd creates a new ticket with this title
-	NewDescription   string // optional description paired with NewTitle
+// issueTitler is what issue-title derivation needs.
+type issueTitler interface {
+	Available(ctx context.Context) error
+	IssueTitle(ctx context.Context, id string) (string, error)
 }
+
+// issueAssigner is what the self-assign offer needs.
+type issueAssigner interface {
+	IssueAssignMe(ctx context.Context, id string) error
+}
+
+// TicketFlow is the interactive ticket-attachment flow. The seam that keeps
+// terminals out of tests is the function type — fakes are closures, the real
+// impl (tui.PickTicketFlow) is wired in cmd/arat/main.go. The options and
+// result are tui's own types on purpose: a hand-mirrored copy would need a
+// conversion switch over TicketAction, and a non-exhaustive one silently
+// degrades a newly added action into "no ticket".
+type TicketFlow func(ctx context.Context, lc linear.Reader, opts tui.TicketFlowOptions, out io.Writer) (tui.TicketFlowResult, error)
 
 // NameFlow is the interactive workspace-name prompt `arat new` opens when no
 // name argument was given, pre-filled with a slug derived from the issue
@@ -122,11 +141,9 @@ type RepoFlowResult struct {
 
 // Service is the workspace-domain surface the commands need.
 type Service interface {
-	List(ctx context.Context) ([]workspace.Workspace, error)
-	// ListLight is List with repo names and branches only, read from the
-	// filesystem — no git subprocesses, no dirty/unpushed/stash state.
-	ListLight(ctx context.Context) ([]workspace.Workspace, error)
-	ListShallow(ctx context.Context) ([]workspace.Workspace, error)
+	// List walks the workspace tree; the Detail option picks the per-repo
+	// cost (full git inspection, filesystem-only, or no repos at all).
+	List(ctx context.Context, opts workspace.ListOptions) ([]workspace.Workspace, error)
 	Get(ctx context.Context, ref string) (*workspace.Workspace, error)
 	New(ctx context.Context, opts workspace.NewOptions) (*workspace.Workspace, error)
 	Remove(ctx context.Context, opts workspace.RemoveOptions) (*workspace.RemoveResult, error)
@@ -134,6 +151,9 @@ type Service interface {
 	AddRepos(ctx context.Context, opts workspace.AddReposOptions) (*workspace.AddReposResult, error)
 	ListRepoCandidates() ([]workspace.RepoCandidate, error)
 	MoveSessionFile(ctx context.Context, sessionID, targetWorkspacePath string) (srcPath, dstPath string, err error)
+	// ForkSessionFile copies a session under a fresh id into the workspace's
+	// project dir, leaving the source session untouched.
+	ForkSessionFile(ctx context.Context, sessionID, targetWorkspacePath string) (srcPath, dstPath, newID string, err error)
 	// WorkspaceAt resolves the workspace containing a directory (deepest wins).
 	WorkspaceAt(ctx context.Context, dir string) (*workspace.Workspace, error)
 	// ProjectAt resolves the nearest project containing a directory, or
@@ -145,12 +165,6 @@ type Service interface {
 
 // Root builds the root cobra command.
 func Root(d Deps) *cobra.Command {
-	var (
-		configPath string
-		jsonOut    bool
-		verbose    bool
-	)
-
 	root := &cobra.Command{
 		Use:   "arat",
 		Short: "Per-task git-worktree workspaces with Claude context",
@@ -177,31 +191,26 @@ messages; stdout is for results / JSON.
 
 Exit codes:
   0  ok
-  1  generic failure (uncategorized)
+  1  generic failure (arat's own; never git/linear)
   2  usage error
   3  not found
-  4  precondition failed (dirty / unpushed; non-empty project)
+  4  precondition failed (dirty / unpushed / non-empty scratch or project)
   5  conflict (already exists)
-  6  external tool error (git, linear)
+  6  external tool error (git, linear — nothing else maps here)
   7  config error
+  130  interrupted (Ctrl-C / SIGTERM; cleanup has already run)
 `,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
 
-	root.PersistentFlags().StringVar(&configPath, "config", "", "path to config file (default: $ARAT_CONFIG, $XDG_CONFIG_HOME/arat/config.toml, $HOME/.config/arat/config.toml)")
-	root.PersistentFlags().BoolVar(&jsonOut, "json", false, "emit JSON output where supported")
+	state := &state{deps: d}
+	root.PersistentFlags().StringVar(&state.configPath, "config", "", "path to config file (default: $ARAT_CONFIG, $XDG_CONFIG_HOME/arat/config.toml, $HOME/.config/arat/config.toml)")
+	root.PersistentFlags().BoolVar(&state.jsonOut, "json", false, "emit JSON output where supported")
 	// No backticks in the usage string: pflag renders backticked text as the
 	// flag's value placeholder, which would make a boolean flag read as if
 	// it took an argument.
-	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "emit per-step progress to stderr (one line per repo during new)")
-
-	state := &state{
-		deps:       d,
-		configPath: &configPath,
-		jsonOut:    &jsonOut,
-		verbose:    &verbose,
-	}
+	root.PersistentFlags().BoolVarP(&state.verbose, "verbose", "v", false, "emit per-step progress to stderr (one line per repo during new)")
 
 	root.AddCommand(
 		newLsCmd(state),
@@ -262,16 +271,29 @@ func commandPathTail(cmd *cobra.Command) string {
 	return strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
 }
 
+// state carries the injected deps plus the persistent-flag values, which
+// cobra writes straight into these fields — no pointer hop at read time.
 type state struct {
 	deps       Deps
-	configPath *string
-	jsonOut    *bool
-	verbose    *bool
+	configPath string
+	jsonOut    bool
+	verbose    bool
+}
+
+// service builds the workspace service for cfg, mapping construction
+// failures to the config exit code so they render and exit like every other
+// classified error instead of short-circuiting the process inside a factory.
+func (s *state) service(cfg *config.Config) (Service, error) {
+	svc, err := s.deps.NewService(cfg)
+	if err != nil {
+		return nil, &exitErr{code: ExitConfig, err: err}
+	}
+	return svc, nil
 }
 
 func (s *state) writer() *output.Writer {
 	w := &output.Writer{Out: s.deps.Stdout, Err: s.deps.Stderr, Format: output.Text}
-	if *s.jsonOut {
+	if s.jsonOut {
 		w.Format = output.JSON
 	}
 	return w
@@ -279,7 +301,7 @@ func (s *state) writer() *output.Writer {
 
 // loadConfig resolves and loads the config, mapping ErrNotFound to a clear message.
 func (s *state) loadConfig() (*config.Config, error) {
-	path, err := config.ResolvePath(*s.configPath)
+	path, err := config.ResolvePath(s.configPath)
 	if err != nil {
 		return nil, &exitErr{code: ExitConfig, err: err}
 	}
@@ -310,32 +332,63 @@ func workspaceFromCwd(ctx context.Context, svc Service, cwdFn func() (string, er
 	return svc.WorkspaceAt(ctx, cwd)
 }
 
+// mapUnclassifiedError is the default branch of the per-command error
+// mappers. Git and linear failures carry their packages' ErrCmd sentinel and
+// keep the external-tool exit code; everything else (filesystem, wiring,
+// arat's own bugs) exits generic. This is what keeps exit 6 meaning "git or
+// linear failed" — the one code wrapper scripts may treat as retryable —
+// instead of "anything arat didn't classify".
+func mapUnclassifiedError(err error) *exitErr {
+	if errors.Is(err, git.ErrCmd) || errors.Is(err, linear.ErrCmd) {
+		return &exitErr{code: ExitExternal, err: err}
+	}
+	return &exitErr{code: ExitGeneric, err: err}
+}
+
 // exitErr wraps an error with the exit code arat should return.
 type exitErr struct {
-	code int
+	code ExitCode
 	err  error
 }
 
 func (e *exitErr) Error() string { return e.err.Error() }
 func (e *exitErr) Unwrap() error { return e.err }
 
-// Execute runs the root command and returns the desired process exit code.
-func Execute(d Deps, args []string) int {
+// Execute runs the root command under ctx and returns the desired process
+// exit code. ctx is the cancellation root: main derives it from
+// signal.NotifyContext so Ctrl-C reaches every subprocess and errgroup
+// through cmd.Context().
+func Execute(ctx context.Context, d Deps, args []string) ExitCode {
 	if d.Stdout == nil {
 		d.Stdout = os.Stdout
 	}
 	if d.Stderr == nil {
 		d.Stderr = os.Stderr
 	}
+	// The two factories every command needs are wiring, not user input: a
+	// nil one is a bug in the embedding binary, reported once here rather
+	// than as a cryptic panic (or usage error) deep inside a handler. The
+	// interactive deps stay optional — nil legitimately means "not
+	// available", and isInteractive gates them.
+	if d.NewConfig == nil || d.NewService == nil {
+		fmt.Fprintln(d.Stderr, "error: arat wiring incomplete: NewConfig and NewService must be set")
+		return ExitGeneric
+	}
 	cmd := Root(d)
 	cmd.SetArgs(args)
 	cmd.SetOut(d.Stdout)
 	cmd.SetErr(d.Stderr)
-	err := cmd.Execute()
+	err := cmd.ExecuteContext(ctx)
 	if err == nil {
 		return ExitOK
 	}
 	fmt.Fprintf(d.Stderr, "error: %v\n", err)
+	// A cancelled root context means the user interrupted the run; the error
+	// above still prints (it may carry cleanup notes) but the exit code
+	// reports the interruption, not whatever failure the cancellation caused.
+	if ctx.Err() != nil {
+		return ExitInterrupted
+	}
 	var ee *exitErr
 	if errors.As(err, &ee) {
 		return ee.code

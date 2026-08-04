@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,6 +28,30 @@ branch_prefix = "ps"
 	assert.NotNil(t, cfg.TicketRegex())
 	assert.Equal(t, "auto", cfg.TUI.Theme)
 	assert.Equal(t, path, cfg.Path)
+	assert.Equal(t, 5*time.Minute, cfg.CommandTimeoutDuration(), "per-subprocess timeout defaults to 5m")
+}
+
+func TestLoad_commandTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+root = "/tmp/myroot"
+branch_prefix = "ps"
+command_timeout = "90s"
+`), 0o644))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, 90*time.Second, cfg.CommandTimeoutDuration())
+
+	require.NoError(t, os.WriteFile(path, []byte(`
+root = "/tmp/myroot"
+branch_prefix = "ps"
+command_timeout = "0"
+`), 0o644))
+	cfg, err = Load(path)
+	require.NoError(t, err)
+	assert.Zero(t, cfg.CommandTimeoutDuration(), `"0" disables the bound`)
 }
 
 func TestLoad_homeExpansion(t *testing.T) {
@@ -77,6 +102,8 @@ func TestLoad_validationErrors(t *testing.T) {
 		{"branch_prefix has slash", `root = "/tmp"` + "\n" + `branch_prefix = "a/b"`, "branch_prefix"},
 		{"bad ticket regex", `root = "/tmp"` + "\n" + `branch_prefix = "x"` + "\n" + `ticket_pattern = "["`, "ticket_pattern"},
 		{"bad theme", `root = "/tmp"` + "\n" + `branch_prefix = "x"` + "\n" + `[tui]` + "\n" + `theme = "neon"`, "tui.theme"},
+		{"bad command_timeout", `root = "/tmp"` + "\n" + `branch_prefix = "x"` + "\n" + `command_timeout = "fast"`, "command_timeout"},
+		{"negative command_timeout", `root = "/tmp"` + "\n" + `branch_prefix = "x"` + "\n" + `command_timeout = "-1s"`, "command_timeout"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

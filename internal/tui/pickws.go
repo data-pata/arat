@@ -84,8 +84,12 @@ func (i wsItem) Description() string {
 	if i.Ticket != "" {
 		parts = append(parts, dimStyle.Render(i.Ticket))
 	}
-	if len(i.Repos) > 0 {
-		parts = append(parts, fmt.Sprintf("%d repo%s", len(i.Repos), pluralS(len(i.Repos))))
+	if n := len(i.Repos); n > 0 {
+		s := "s"
+		if n == 1 {
+			s = ""
+		}
+		parts = append(parts, fmt.Sprintf("%d repo%s", n, s))
 	}
 	if n := len(workspace.Descendants(workspace.Workspace(i))); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d nested", n))
@@ -127,13 +131,6 @@ func summarizeFlags(ws workspace.Workspace) string {
 		parts = append(parts, warnStyle.Render(fmt.Sprintf("stashes:%d", stashes)))
 	}
 	return strings.Join(parts, " ")
-}
-
-func pluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
 }
 
 var (

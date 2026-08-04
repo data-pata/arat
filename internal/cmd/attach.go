@@ -8,6 +8,7 @@ import (
 
 	"github.com/data-pata/arat/internal/config"
 	"github.com/data-pata/arat/internal/linear"
+	"github.com/data-pata/arat/internal/tui"
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -83,7 +84,10 @@ shows them without a network call. Re-attaching replaces the previous link;
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 
 			// Positional grammar: the last argument is the thing to attach,
 			// except under --new (where the flag carries it), so a lone
@@ -140,7 +144,7 @@ func runAttachTask(cmd *cobra.Command, s *state, cfg *config.Config, svc Service
 		if !cfg.Linear.Enabled {
 			return &exitErr{code: ExitUsage, err: errors.New("--new requires linear (set [linear] enabled = true)")}
 		}
-		id, err := createTicket(cmd.Context(), s.deps.NewLinear(), cfg.Linear.DefaultTeam, newTitle, description)
+		id, err := createTicket(cmd.Context(), s.deps.NewLinear(cfg), cfg.Linear.DefaultTeam, newTitle, description)
 		if err != nil {
 			return err
 		}
@@ -155,26 +159,31 @@ func runAttachTask(cmd *cobra.Command, s *state, cfg *config.Config, svc Service
 		if !isInteractive(s.deps) || s.deps.TicketFlow == nil {
 			return &exitErr{code: ExitUsage, err: errors.New("a ticket id is required outside a terminal (or pass --new \"<title>\")")}
 		}
-		lc := s.deps.NewLinear()
+		lc := s.deps.NewLinear(cfg)
 		if err := lc.Available(cmd.Context()); err != nil {
 			return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 		}
-		res, err := s.deps.TicketFlow(cmd.Context(), lc, TicketFlowOptions{Team: cfg.Linear.DefaultTeam}, s.deps.Stderr)
+		res, err := s.deps.TicketFlow(cmd.Context(), lc, tui.TicketFlowOptions{Team: cfg.Linear.DefaultTeam}, s.deps.Stderr)
 		if err != nil {
-			return &exitErr{code: ExitExternal, err: err}
+			return &exitErr{code: ExitGeneric, err: err}
 		}
-		switch {
-		case res.Cancelled || res.Skip:
+		switch res.Action {
+		case tui.ActionCancelled, tui.ActionSkip:
+			// AllowSkip is off for attach, so a skip can only mean cancel.
 			return &exitErr{code: ExitUsage, err: errors.New("cancelled")}
-		case res.Ticket != "":
-			ticket = res.Ticket
-			offerAssign(cmd.Context(), s, lc, ticket, res.TicketUnassigned)
-		case res.NewTitle != "":
+		case tui.ActionPick:
+			ticket = res.IssueID
+			offerAssign(cmd.Context(), s, lc, ticket, res.IssueUnassigned)
+		case tui.ActionCreate:
 			id, err := createTicket(cmd.Context(), lc, cfg.Linear.DefaultTeam, res.NewTitle, res.NewDescription)
 			if err != nil {
 				return err
 			}
 			ticket = id
+		default:
+			// Every action must be handled here by name: falling through
+			// would attach nothing after the user picked something in the TUI.
+			return &exitErr{code: ExitGeneric, err: fmt.Errorf("unhandled ticket-flow action %d", res.Action)}
 		}
 	}
 
@@ -216,7 +225,7 @@ func runAttachProject(cmd *cobra.Command, s *state, cfg *config.Config, svc Serv
 	if newTitle == "" && query == "" && (!isInteractive(s.deps) || s.deps.PickContainer == nil) {
 		return &exitErr{code: ExitUsage, err: fmt.Errorf("%s is a project workspace and needs a Linear project or initiative — pass its name or slug id, or --new \"<name>\" (or run in a terminal to pick interactively)", ws.Ref)}
 	}
-	lc := s.deps.NewLinear()
+	lc := s.deps.NewLinear(cfg)
 	if err := lc.Available(cmd.Context()); err != nil {
 		return &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 	}
@@ -296,7 +305,10 @@ all back. Remove the workspace and recreate it instead.
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 
 			var explicitRef string
 			if len(args) == 1 {
@@ -330,7 +342,7 @@ all back. Remove the workspace and recreate it instead.
 
 // fetchAllContainers returns every Linear project and initiative, the
 // candidate set a project workspace can attach to.
-func fetchAllContainers(cmd *cobra.Command, lc LinearClient) ([]linear.Container, error) {
+func fetchAllContainers(cmd *cobra.Command, lc linear.ContainerLister) ([]linear.Container, error) {
 	projects, err := lc.ContainerList(cmd.Context(), linear.ContainerProject)
 	if err != nil {
 		return nil, &exitErr{code: ExitExternal, err: err}

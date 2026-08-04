@@ -20,7 +20,10 @@ internal/
 ```
 
 Convention: packages declare their deps as interfaces, composition lives in
-`cmd/arat/main.go` and `internal/cmd/`. No package imports a sibling domain package.
+`cmd/arat/main.go` and `internal/cmd/`. `internal/cmd` composes the other
+packages; between domain packages, imports carry only producer-declared types
+and error sentinels (`workspace` → `git.Inspection`, `cmd` → `tui`'s flow
+types, `git.ErrCmd`/`linear.ErrCmd`), never behaviour.
 
 ## Commands (target)
 
@@ -53,7 +56,10 @@ marker is what disambiguates a workspace's subdirectories: one that carries it
 is a child workspace, one git calls a worktree is a repo, anything else is
 ignored. `Service.hydrateContents` runs that same classification for both
 kinds. A directory with no marker reads as a task workspace, so workspaces
-predating projects keep working with no migration.
+predating projects keep working with no migration. A marker that exists but
+cannot be read degrades only its own workspace (`Workspace.MetaError`, shown
+by `ls`): the walk continues, `rm` still works there (it is the repair path),
+and structural operations (`new --in`, attach, link) refuse it.
 
 `arat new` infers its parent from cwd via `Service.ProjectAt`, which walks up
 to the nearest *project*, past any number of tasks. Standing in a task is the
@@ -89,9 +95,16 @@ unique across the tree, returning `*ErrAmbiguous` rather than guessing.
 ## Exit codes
 
 - `0` success
+- `1` generic failure (arat's own: filesystem, TUI, bugs — never git/linear)
 - `2` usage error
 - `3` not found
-- `4` precondition failed (dirty / unpushed / stash; `--force` overrides)
+- `4` precondition failed (dirty / unpushed / non-empty scratch; `--force` overrides)
 - `5` conflict (already exists)
-- `6` external tool error (git, linear)
+- `6` external tool error (git, linear — the only code carrying that meaning)
 - `7` config error
+- `130` interrupted (Ctrl-C / SIGTERM; failure cleanup has already run)
+
+`6` is reserved for failures of git or the `linear` CLI (`git.ErrCmd` /
+`linear.ErrCmd` sentinels); the per-command mappers default everything
+unclassified to `1`, so wrappers can treat `6` as "the tool flaked, maybe
+retry" and every other non-zero code as "don't retry".

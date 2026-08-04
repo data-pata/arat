@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -242,6 +243,62 @@ func TestMoveSessionFile_errIfEmptySessionID(t *testing.T) {
 func TestMoveSessionFile_errIfClaudeProjectsDirUnset(t *testing.T) {
 	s := &Service{WorkspacesDir: t.TempDir()}
 	_, _, err := s.MoveSessionFile(t.Context(), "sid", "/x")
+	require.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestForkSessionFile_copiesUnderNewIDRewritingEmbeddedIDs(t *testing.T) {
+	wsDir := t.TempDir()
+	target := filepath.Join(wsDir, "abc-1--feat")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+
+	srcEnc := EncodeCwdAsProjectDir("/home/u/git/myorg")
+	dstEnc := EncodeCwdAsProjectDir(target)
+	root := filepath.Join(t.TempDir(), "projects")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, srcEnc), 0o755))
+	id := "2bba4a38-93e1-4e9c-8921-faeb1c151189"
+	// Mixed lines: with the id, without it, and a final line with no trailing
+	// newline. All three shapes occur in real transcripts.
+	original := `{"type":"user","sessionId":"` + id + `"}` + "\n" +
+		`{"type":"progress"}` + "\n" +
+		`{"type":"assistant","sessionId":"` + id + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(root, srcEnc, id+".jsonl"), []byte(original), 0o600))
+
+	s := &Service{WorkspacesDir: wsDir, ClaudeProjectsDir: root}
+	src, dst, newID, err := s.ForkSessionFile(t.Context(), id, target)
+	require.NoError(t, err)
+
+	assert.Equal(t, filepath.Join(root, srcEnc, id+".jsonl"), src)
+	assert.Equal(t, filepath.Join(root, dstEnc, newID+".jsonl"), dst)
+	assert.NotEqual(t, id, newID)
+	assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, newID)
+
+	// The source stays byte-identical: forking must be safe on a live session.
+	data, err := os.ReadFile(src)
+	require.NoError(t, err)
+	assert.Equal(t, original, string(data))
+
+	forked, err := os.ReadFile(dst)
+	require.NoError(t, err)
+	assert.Equal(t, strings.ReplaceAll(original, id, newID), string(forked))
+}
+
+func TestForkSessionFile_errIfSessionMissing(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "projects")
+	require.NoError(t, os.MkdirAll(root, 0o755))
+	s := &Service{WorkspacesDir: t.TempDir(), ClaudeProjectsDir: root}
+	_, _, _, err := s.ForkSessionFile(t.Context(), "deadbeef", "/x")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestForkSessionFile_errIfEmptySessionID(t *testing.T) {
+	s := &Service{WorkspacesDir: t.TempDir(), ClaudeProjectsDir: t.TempDir()}
+	_, _, _, err := s.ForkSessionFile(t.Context(), "", "/x")
+	require.ErrorIs(t, err, ErrInvalidInput)
+}
+
+func TestForkSessionFile_errIfClaudeProjectsDirUnset(t *testing.T) {
+	s := &Service{WorkspacesDir: t.TempDir()}
+	_, _, _, err := s.ForkSessionFile(t.Context(), "sid", "/x")
 	require.ErrorIs(t, err, ErrInvalidInput)
 }
 

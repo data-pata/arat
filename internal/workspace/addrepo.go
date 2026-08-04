@@ -178,21 +178,26 @@ func (s *Service) addReposToOne(ctx context.Context, ws Workspace, repos []strin
 		outcome.Added = append(outcome.Added, RepoStatus{Name: repo, Path: target, Branch: branch})
 	}
 
-	// Regenerate <name>.code-workspace iff one already exists. Don't create
-	// one here — that's a config / `arat new` decision.
 	if len(outcome.Added) > 0 {
+		names := make([]string, 0, len(ws.Repos)+len(outcome.Added))
+		for _, r := range ws.Repos {
+			names = append(names, r.Name)
+		}
+		for _, r := range outcome.Added {
+			names = append(names, r.Name)
+		}
+		// Regenerate <name>.code-workspace iff one already exists. Don't
+		// create one here — that's a config / `arat new` decision.
 		cwPath := filepath.Join(ws.Path, ws.Name+".code-workspace")
 		if _, err := os.Stat(cwPath); err == nil {
-			names := make([]string, 0, len(ws.Repos)+len(outcome.Added))
-			for _, r := range ws.Repos {
-				names = append(names, r.Name)
-			}
-			for _, r := range outcome.Added {
-				names = append(names, r.Name)
-			}
 			if err := writeCodeWorkspace(ws.Path, ws.Name, names); err != nil {
 				return outcome, fmt.Errorf("regenerate code-workspace: %w", err)
 			}
+		}
+		// Keep the generated Repos line in CLAUDE.md matching what the
+		// workspace now carries — it is the context the agent reads.
+		if err := updateClaudeMDRepos(ws.Path, names); err != nil {
+			return outcome, fmt.Errorf("update CLAUDE.md repos: %w", err)
 		}
 	}
 	return outcome, nil

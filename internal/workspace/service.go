@@ -24,6 +24,10 @@ type Git interface {
 	Fetch(ctx context.Context, repoDir string) error
 	WorktreeAdd(ctx context.Context, repoDir, branch, target, base string) error
 	WorktreeRemove(ctx context.Context, repoDir, target string, force bool) error
+	// WorktreePrune clears worktree registrations whose directories are
+	// gone. New's failure cleanup uses it to sweep up after a worktree add
+	// that was killed mid-flight and so never became removable by path.
+	WorktreePrune(ctx context.Context, repoDir string) error
 	BranchDelete(ctx context.Context, repoDir, branch string, force bool) error
 	BranchRename(ctx context.Context, repoDir, from, to string) error
 	BranchExists(ctx context.Context, repoDir, branch string) bool
@@ -55,10 +59,10 @@ type Service struct {
 	Git                   Git
 
 	// ClaudeProjectsDir is the path to Claude Code's per-cwd session-history
-	// root (`~/.claude/projects/` by default). When set, `AttachTicket` and
-	// `MoveSessionFile` migrate session jsonls alongside workspace
-	// renames/promotions. Leave empty to disable session migration entirely
-	// (used in tests that don't care about it).
+	// root (`~/.claude/projects/` by default). When set, `AttachTicket`,
+	// `MoveSessionFile`, and `ForkSessionFile` migrate or copy session jsonls
+	// alongside workspace operations. Leave empty to disable session handling
+	// entirely (used in tests that don't care about it).
 	ClaudeProjectsDir string
 }
 
@@ -124,34 +128,56 @@ const (
 	listFull
 )
 
+// Detail selects how much per-repo work List does. The tree itself is always
+// walked in full — nesting comes from the marker file at one stat per
+// directory — so the levels differ only in what each workspace's Repos carry
+// and how many git subprocesses that costs.
+type Detail int
+
+const (
+	// DetailFull inspects every worktree with git: dirty / unpushed / stash
+	// state, around five subprocesses per worktree, one of which
+	// (`git status`) scales with repo size. The zero value on purpose — a
+	// caller that does not choose gets the complete answer, never silently
+	// missing state.
+	DetailFull Detail = iota
+	// DetailLight reads repo names and branches from the filesystem alone
+	// (.git files), no subprocesses. What `arat ls` uses by default; full
+	// inspection is opt-in via `arat ls --status`.
+	DetailLight
+	// DetailBare skips repos entirely: every Repos slice comes back empty.
+	// Used by the interactive picker, which renders refs only.
+	DetailBare
+)
+
+// mode maps the public detail level onto the internal walk mode.
+func (d Detail) mode() listMode {
+	switch d {
+	case DetailLight:
+		return listLight
+	case DetailBare:
+		return listBare
+	}
+	return listFull
+}
+
+// ListOptions controls List. The zero value asks for a full listing.
+type ListOptions struct {
+	Detail Detail
+}
+
 // List enumerates the workspace tree under WorkspacesDir, sorted by name.
 //
 // Top-level workspaces are returned; a project workspace carries its nested
-// workspaces on Children (recursively). Each entry is fully hydrated with its
-// repos (subdirs that look like git worktrees) and their inspection.
+// workspaces on Children (recursively). What each entry's Repos carry is the
+// Detail option's choice — the detail level is one axis of the same walk,
+// not a family of methods, so a new level is a new constant rather than a
+// new method on every consumer interface and fake.
 //
 // Use Flatten on the result when you want every workspace regardless of
 // depth. Returns ErrNoWorkspacesDir if WorkspacesDir does not exist.
-func (s *Service) List(ctx context.Context) ([]Workspace, error) {
-	return s.list(ctx, listFull)
-}
-
-// ListLight is List with per-repo information limited to what the filesystem
-// can answer: repo names and branches, but no dirty / unpushed / stash state.
-// It runs no git subprocesses at all, so it is what `arat ls` uses by default
-// — full inspection is opt-in via `arat ls --status`.
-func (s *Service) ListLight(ctx context.Context) ([]Workspace, error) {
-	return s.list(ctx, listLight)
-}
-
-// ListShallow is List without any per-repo information: every Repos slice
-// comes back empty. Used by the interactive picker, which renders refs only.
-//
-// The tree itself is still walked in full — nesting is derived from the
-// workspace marker file, which costs one stat per directory and no git calls,
-// so the picker can still offer nested workspaces.
-func (s *Service) ListShallow(ctx context.Context) ([]Workspace, error) {
-	return s.list(ctx, listBare)
+func (s *Service) List(ctx context.Context, opts ListOptions) ([]Workspace, error) {
+	return s.list(ctx, opts.Detail.mode())
 }
 
 func (s *Service) list(ctx context.Context, mode listMode) ([]Workspace, error) {
@@ -303,10 +329,13 @@ func (e *ErrPrecondition) Error() string {
 // entry from the filesystem (names and branches, no state, no subprocesses),
 // listBare skips repos entirely and only the marker drives recursion.
 func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, created time.Time, mode listMode, depth int) (Workspace, error) {
-	meta, err := readMeta(full)
-	if err != nil {
-		return Workspace{}, err
-	}
+	// A marker that exists but cannot be read degrades this one workspace
+	// instead of failing the whole walk: the fault is carried on MetaError,
+	// the workspace reads as a task, and every other workspace stays
+	// listable, resolvable, and removable. Failing the walk here would brick
+	// `ls`, `go`, and — fatally — the `rm` needed to repair the situation,
+	// over a single bad file anywhere in the tree.
+	meta, metaErr := readMeta(full)
 
 	ws := Workspace{
 		Name:    name,
@@ -319,6 +348,9 @@ func (s *Service) hydrateDir(ctx context.Context, parentRef, name, full string, 
 		// shallow listing) marshals as "repos": [] rather than null —
 		// JSON consumers index into it unconditionally.
 		Repos: []RepoStatus{},
+	}
+	if metaErr != nil {
+		ws.MetaError = metaErr.Error()
 	}
 	if meta != nil {
 		ws.Kind = meta.Kind
@@ -392,7 +424,6 @@ func (s *Service) hydrateContents(ctx context.Context, ws *Workspace, mode listM
 				return err
 			}
 			ws.Children = append(ws.Children, child)
-			continue
 		}
 	}
 	sort.Slice(ws.Children, func(i, j int) bool { return ws.Children[i].Name < ws.Children[j].Name })

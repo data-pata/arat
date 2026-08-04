@@ -44,21 +44,28 @@ exactly once, at any depth.
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
-			list := svc.ListLight
-			if status {
-				list = svc.List
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
 			}
-			items, err := list(cmd.Context())
+			detail := workspace.DetailLight
+			if status {
+				detail = workspace.DetailFull
+			}
+			items, err := svc.List(cmd.Context(), workspace.ListOptions{Detail: detail})
 			if err != nil {
 				if errors.Is(err, workspace.ErrNoWorkspacesDir) {
-					// No workspaces yet is not an error; print an informational note.
-					s.writer().JSONRecord([]workspace.Workspace{}, func(out io.Writer) {
+					// No workspaces yet is not an error. The text closure
+					// deliberately ignores its stdout writer and notes the
+					// situation on stderr instead: stdout stays parseable
+					// (`--json` still emits []), and "nothing here yet" is
+					// operational commentary, not a result.
+					s.writer().JSONRecord([]workspace.Workspace{}, func(io.Writer) {
 						fmt.Fprintf(s.deps.Stderr, "no workspaces yet (workspaces_dir does not exist: %s)\n", cfg.WorkspacesDir)
 					})
 					return nil
 				}
-				return &exitErr{code: ExitExternal, err: err}
+				return mapUnclassifiedError(err)
 			}
 			if flat {
 				flatItems := flattenForLs(items)
@@ -144,6 +151,9 @@ func writeWorkspaceHeader(out io.Writer, pad string, ws workspace.Workspace, lab
 // writeWorkspaceBody prints the ticket/linear/repo lines shared by the tree
 // and flat renderings.
 func writeWorkspaceBody(out io.Writer, body string, ws workspace.Workspace) {
+	if ws.MetaError != "" {
+		fmt.Fprintf(out, "%s⚠ unreadable marker: %s\n", body, ws.MetaError)
+	}
 	if ws.TicketURL != "" {
 		fmt.Fprintf(out, "%s%s\n", body, ws.TicketURL)
 	}

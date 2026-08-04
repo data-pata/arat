@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/data-pata/arat/internal/cmd"
 	"github.com/data-pata/arat/internal/config"
@@ -48,12 +50,41 @@ func defaultClaudeProjectsDir() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
+// gitClient and linearClient build the subprocess wrappers from config.
+// ARAT_TRACE (any non-empty value) additionally logs every subprocess to
+// stderr with its argv and duration — everything arat does is a subprocess,
+// so this is the observability switch for "what ran, and what did it cost".
+func gitClient(cfg *config.Config) *git.Git {
+	if os.Getenv("ARAT_TRACE") != "" {
+		return git.NewTraced(cfg.CommandTimeoutDuration(), os.Stderr)
+	}
+	return git.NewWithTimeout(cfg.CommandTimeoutDuration())
+}
+
+func linearClient(cfg *config.Config) *linear.Linear {
+	if os.Getenv("ARAT_TRACE") != "" {
+		return linear.NewTraced(cfg.CommandTimeoutDuration(), os.Stderr)
+	}
+	return linear.NewWithTimeout(cfg.CommandTimeoutDuration())
+}
+
 func main() {
+	// Ctrl-C / SIGTERM cancel the root context, which reaches every git and
+	// linear subprocess (and `new`'s errgroup) through cmd.Context(), so
+	// in-flight work stops and failure cleanup still runs. After the first
+	// signal, restore the default disposition: a second Ctrl-C must kill the
+	// process even if cleanup hangs.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
 	deps := cmd.Deps{
 		Stdout:    os.Stdout,
 		Stderr:    os.Stderr,
 		NewConfig: config.Load,
-		NewService: func(cfg *config.Config) cmd.Service {
+		NewService: func(cfg *config.Config) (cmd.Service, error) {
 			svc, err := workspace.NewService(workspace.ServiceOptions{
 				Root:                  cfg.Root,
 				WorkspacesDir:         cfg.WorkspacesDir,
@@ -64,49 +95,28 @@ func main() {
 				AutoReposGlob:         cfg.AutoReposGlob,
 				GenerateCodeWorkspace: cfg.GenerateCodeWorkspace,
 				ClaudeProjectsDir:     defaultClaudeProjectsDir(),
-				Git:                   git.New(),
+				Git:                   gitClient(cfg),
 			})
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "arat: %v\n", err)
-				os.Exit(cmd.ExitConfig)
-			}
-			return svc
-		},
-		PickWorkspace: func(ctx context.Context, items []workspace.Workspace, out io.Writer) (*workspace.Workspace, error) {
-			ws, err := tui.PickWorkspace(ctx, items, out)
 			if err != nil {
 				return nil, err
 			}
-			return ws, nil
+			return svc, nil
 		},
+		PickWorkspace: tui.PickWorkspace,
 		PickContainer: func(ctx context.Context, containers []linear.Container, out io.Writer) (*linear.Container, error) {
 			return tui.PickContainer(ctx, containers, out)
 		},
-		NewLinear: func() cmd.LinearClient { return linear.New() },
+		NewLinear: func(cfg *config.Config) cmd.LinearClient { return linearClient(cfg) },
 		Cwd:       os.Getwd,
-		IsTTY:     func() bool { return term.IsTerminal(int(os.Stdin.Fd())) },
-		Confirm:   confirm,
-		TicketFlow: func(ctx context.Context, lr linear.Reader, opts cmd.TicketFlowOptions, out io.Writer) (cmd.TicketFlowResult, error) {
-			res, err := tui.PickTicketFlow(ctx, lr, tui.TicketFlowOptions{Team: opts.Team, AllowSkip: opts.AllowSkip}, out)
-			if err != nil {
-				return cmd.TicketFlowResult{}, err
-			}
-			var out_ cmd.TicketFlowResult
-			switch res.Action {
-			case tui.ActionPick:
-				out_.Ticket = res.IssueID
-				out_.TicketTitle = res.IssueTitle
-				out_.TicketUnassigned = res.IssueUnassigned
-			case tui.ActionSkip:
-				out_.Skip = true
-			case tui.ActionCancelled:
-				out_.Cancelled = true
-			case tui.ActionCreate:
-				out_.NewTitle = res.NewTitle
-				out_.NewDescription = res.NewDescription
-			}
-			return out_, nil
+		// Interactive needs both ends of the conversation: the pickers read
+		// keys from stdin (or /dev/tty) and render to stderr. Probing stdin
+		// alone would let `arat go 2>log` write escape sequences into the
+		// log instead of showing a picker.
+		IsTTY: func() bool {
+			return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stderr.Fd()))
 		},
+		Confirm:    confirm,
+		TicketFlow: tui.PickTicketFlow,
 		NameFlow: func(ctx context.Context, def, ticket string, out io.Writer) (cmd.NameFlowResult, error) {
 			name, cancelled, err := tui.AskName(ctx, def, ticket, out)
 			if err != nil {
@@ -122,5 +132,5 @@ func main() {
 			return cmd.RepoFlowResult{Cancelled: cancelled, Repos: selected}, nil
 		},
 	}
-	os.Exit(cmd.Execute(deps, os.Args[1:]))
+	os.Exit(int(cmd.Execute(ctx, deps, os.Args[1:])))
 }

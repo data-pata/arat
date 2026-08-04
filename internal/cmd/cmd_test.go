@@ -13,6 +13,7 @@ import (
 
 	"github.com/data-pata/arat/internal/config"
 	"github.com/data-pata/arat/internal/linear"
+	"github.com/data-pata/arat/internal/tui"
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,6 +30,7 @@ type fakeService struct {
 	newErr           error
 	removeResult     *workspace.RemoveResult
 	removeErr        error
+	removeScratchErr *workspace.ErrScratchNotEmpty
 	attachResult     *workspace.AttachResult
 	attachErr        error
 	addReposResult   *workspace.AddReposResult
@@ -38,6 +40,10 @@ type fakeService struct {
 	moveSessionSrc   string
 	moveSessionDst   string
 	moveSessionErr   error
+	forkSessionSrc   string
+	forkSessionDst   string
+	forkSessionNewID string
+	forkSessionErr   error
 	workspaceAtRes   *workspace.Workspace
 	workspaceAtErr   error
 	projectAtRes     *workspace.Workspace
@@ -48,14 +54,14 @@ type fakeService struct {
 	unlinkErr        error
 
 	getCalls         []string
-	listCalls        int
-	listLightCalls   int
+	listCalls        []workspace.ListOptions
 	newCalls         []workspace.NewOptions
 	removeCalls      []workspace.RemoveOptions
 	attachCalls      []workspace.AttachOptions
 	addReposCalls    []workspace.AddReposOptions
 	candidatesCalled int
 	moveSessionCalls []moveSessionCall
+	forkSessionCalls []moveSessionCall
 	workspaceAtCalls []string
 	projectAtCalls   []string
 	linkCalls        []workspace.LinkOptions
@@ -67,15 +73,8 @@ type moveSessionCall struct {
 	TargetWS  string
 }
 
-func (f *fakeService) List(_ context.Context) ([]workspace.Workspace, error) {
-	f.listCalls++
-	return f.listResult, f.listErr
-}
-func (f *fakeService) ListLight(_ context.Context) ([]workspace.Workspace, error) {
-	f.listLightCalls++
-	return f.listResult, f.listErr
-}
-func (f *fakeService) ListShallow(_ context.Context) ([]workspace.Workspace, error) {
+func (f *fakeService) List(_ context.Context, opts workspace.ListOptions) ([]workspace.Workspace, error) {
+	f.listCalls = append(f.listCalls, opts)
 	return f.listResult, f.listErr
 }
 func (f *fakeService) Get(_ context.Context, ref string) (*workspace.Workspace, error) {
@@ -101,6 +100,11 @@ func (f *fakeService) New(_ context.Context, opts workspace.NewOptions) (*worksp
 }
 func (f *fakeService) Remove(_ context.Context, opts workspace.RemoveOptions) (*workspace.RemoveResult, error) {
 	f.removeCalls = append(f.removeCalls, opts)
+	// Mirrors the real service: the scratch refusal clears once the caller
+	// confirms deletion (DeleteScratch) or forces.
+	if f.removeScratchErr != nil && !opts.DeleteScratch && !opts.Force {
+		return nil, f.removeScratchErr
+	}
 	return f.removeResult, f.removeErr
 }
 func (f *fakeService) AttachTicket(_ context.Context, opts workspace.AttachOptions) (*workspace.AttachResult, error) {
@@ -118,6 +122,10 @@ func (f *fakeService) ListRepoCandidates() ([]workspace.RepoCandidate, error) {
 func (f *fakeService) MoveSessionFile(_ context.Context, sessionID, target string) (string, string, error) {
 	f.moveSessionCalls = append(f.moveSessionCalls, moveSessionCall{SessionID: sessionID, TargetWS: target})
 	return f.moveSessionSrc, f.moveSessionDst, f.moveSessionErr
+}
+func (f *fakeService) ForkSessionFile(_ context.Context, sessionID, target string) (string, string, string, error) {
+	f.forkSessionCalls = append(f.forkSessionCalls, moveSessionCall{SessionID: sessionID, TargetWS: target})
+	return f.forkSessionSrc, f.forkSessionDst, f.forkSessionNewID, f.forkSessionErr
 }
 func (f *fakeService) WorkspaceAt(_ context.Context, dir string) (*workspace.Workspace, error) {
 	f.workspaceAtCalls = append(f.workspaceAtCalls, dir)
@@ -149,7 +157,7 @@ func (f *fakeService) UnlinkLinear(_ context.Context, ref string) (*workspace.Wo
 type runResult struct {
 	stdout string
 	stderr string
-	exit   int
+	exit   ExitCode
 	svc    *fakeService
 }
 
@@ -190,12 +198,12 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 	deps := Deps{
 		Stdout: &stdout, Stderr: &stderr,
 		NewConfig:     func(string) (*config.Config, error) { return cfg, nil },
-		NewService:    func(*config.Config) Service { return svc },
+		NewService:    func(*config.Config) (Service, error) { return svc, nil },
 		PickWorkspace: opts.picker,
 		Cwd:           opts.cwd,
 	}
 	if opts.linear != nil {
-		deps.NewLinear = func() LinearClient { return opts.linear }
+		deps.NewLinear = func(*config.Config) LinearClient { return opts.linear }
 	}
 	deps.PickContainer = opts.pickContainer
 	deps.TicketFlow = opts.tickFlow
@@ -203,7 +211,7 @@ func runWithDeps(t *testing.T, args []string, cfg *config.Config, svc *fakeServi
 	deps.NameFlow = opts.nameFlow
 	deps.IsTTY = opts.isTTY
 	deps.Confirm = opts.confirm
-	exit := Execute(deps, args)
+	exit := Execute(context.Background(), deps, args)
 	return runResult{stdout.String(), stderr.String(), exit, svc}
 }
 
@@ -283,7 +291,7 @@ func TestLs_text(t *testing.T) {
 		{Name: "x", Repos: []workspace.RepoStatus{{Name: "r", Branch: "b", Dirty: true, Unpushed: true, Stashes: 3}}},
 	}}
 	r := run(t, []string{"ls"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, "── x ──")
 	assert.Contains(t, r.stdout, "*dirty*")
 	assert.Contains(t, r.stdout, "*unpushed*")
@@ -293,36 +301,38 @@ func TestLs_text(t *testing.T) {
 func TestLs_json(t *testing.T) {
 	svc := &fakeService{listResult: []workspace.Workspace{{Name: "x", Path: "/p"}}}
 	r := run(t, []string{"ls", "--json"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, `"name": "x"`)
 	assert.Contains(t, r.stdout, `"path": "/p"`)
 }
 
 func TestLs_empty(t *testing.T) {
 	r := run(t, []string{"ls"}, nil, nil)
-	assert.Equal(t, 0, r.exit)
+	assert.Equal(t, ExitOK, r.exit)
 	assert.Contains(t, r.stdout, "no workspaces")
 }
 
 func TestLs_noWorkspacesDir(t *testing.T) {
 	svc := &fakeService{listErr: fmt.Errorf("%w: /tmp/x/feat", workspace.ErrNoWorkspacesDir)}
 	r := run(t, []string{"ls"}, nil, svc)
-	assert.Equal(t, 0, r.exit)
+	assert.Equal(t, ExitOK, r.exit)
 	assert.Contains(t, r.stderr, "no workspaces yet")
 }
 
 func TestLs_jsonNoWorkspacesDir(t *testing.T) {
 	svc := &fakeService{listErr: fmt.Errorf("%w: /tmp/x/feat", workspace.ErrNoWorkspacesDir)}
 	r := run(t, []string{"ls", "--json"}, nil, svc)
-	assert.Equal(t, 0, r.exit)
+	assert.Equal(t, ExitOK, r.exit)
 	// JSON branch emits an empty array even when the dir is missing.
 	assert.Equal(t, "[]\n", r.stdout)
 }
 
 func TestLs_serviceError(t *testing.T) {
+	// An unclassified list failure is arat's own (filesystem), not git's or
+	// linear's, so it must exit generic rather than external-tool.
 	svc := &fakeService{listErr: fmt.Errorf("kaboom")}
 	r := run(t, []string{"ls"}, nil, svc)
-	assert.Equal(t, ExitExternal, r.exit)
+	assert.Equal(t, ExitGeneric, r.exit)
 	assert.Contains(t, r.stderr, "kaboom")
 }
 
@@ -331,7 +341,7 @@ func TestLs_serviceError(t *testing.T) {
 func TestNew_happy(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-1--x", Path: "/p", TicketURL: "https://t/ABC-1"}}
 	r := run(t, []string{"new", "x", "--ticket", "abc-1"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, "/p\n", r.stdout)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "x", svc.newCalls[0].ShortName)
@@ -342,7 +352,7 @@ func TestNew_happy(t *testing.T) {
 func TestNew_uppercaseTicketLowered(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "ok", Path: "/p"}}
 	r := run(t, []string{"new", "x", "--ticket", "ABC-1"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "abc-1", svc.newCalls[0].Ticket, "ticket flag is lowercased before passing to service")
 }
@@ -350,7 +360,7 @@ func TestNew_uppercaseTicketLowered(t *testing.T) {
 func TestNew_repos(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	r := run(t, []string{"new", "x", "--no-ticket", "--repos", "a,b,c"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, []string{"a", "b", "c"}, svc.newCalls[0].Repos)
 }
@@ -374,7 +384,7 @@ func TestNew_carrySession_passesIDAndReportsMove(t *testing.T) {
 		moveSessionDst: "/dst/abc.jsonl",
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--carry-session", "abc-123"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.moveSessionCalls, 1)
 	assert.Equal(t, "abc-123", svc.moveSessionCalls[0].SessionID)
 	assert.Equal(t, "/p", svc.moveSessionCalls[0].TargetWS)
@@ -387,15 +397,48 @@ func TestNew_carrySession_failureIsReportedAsWarning(t *testing.T) {
 		moveSessionErr: fmt.Errorf("%w: session", workspace.ErrNotFound),
 	}
 	r := run(t, []string{"new", "x", "--no-ticket", "--carry-session", "abc-123"}, nil, svc)
-	assert.Equal(t, 0, r.exit, "carry-session failure does not abort `new`")
+	assert.Equal(t, ExitOK, r.exit, "carry-session failure does not abort `new`")
 	assert.Contains(t, r.stderr, "⚠ carry-session abc-123")
+}
+
+func TestNew_forkSession_passesIDAndReportsNewID(t *testing.T) {
+	svc := &fakeService{
+		newResult:        &workspace.Workspace{Name: "x", Path: "/p"},
+		forkSessionNewID: "11111111-2222-4333-8444-555555555555",
+	}
+	r := run(t, []string{"new", "x", "--no-ticket", "--fork-session", "abc-123"}, nil, svc)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	require.Len(t, svc.forkSessionCalls, 1)
+	assert.Equal(t, "abc-123", svc.forkSessionCalls[0].SessionID)
+	assert.Equal(t, "/p", svc.forkSessionCalls[0].TargetWS)
+	assert.Contains(t, r.stderr, "forked session: abc-123 → 11111111-2222-4333-8444-555555555555")
+	assert.Contains(t, r.stderr, "claude --resume 11111111-2222-4333-8444-555555555555")
+	assert.Empty(t, svc.moveSessionCalls, "fork must not also move the original")
+}
+
+func TestNew_forkSession_failureIsReportedAsWarning(t *testing.T) {
+	svc := &fakeService{
+		newResult:      &workspace.Workspace{Name: "x", Path: "/p"},
+		forkSessionErr: fmt.Errorf("%w: session", workspace.ErrNotFound),
+	}
+	r := run(t, []string{"new", "x", "--no-ticket", "--fork-session", "abc-123"}, nil, svc)
+	assert.Equal(t, ExitOK, r.exit, "fork-session failure does not abort `new`")
+	assert.Contains(t, r.stderr, "⚠ fork-session abc-123")
+}
+
+func TestNew_carryAndForkSessionAreMutuallyExclusive(t *testing.T) {
+	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
+	r := run(t, []string{"new", "x", "--no-ticket", "--carry-session", "a", "--fork-session", "b"}, nil, svc)
+	assert.Equal(t, ExitUsage, r.exit)
+	assert.Empty(t, svc.newCalls, "no workspace is created on a usage error")
 }
 
 func TestNew_carrySession_notInvokedWhenFlagAbsent(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	r := run(t, []string{"new", "x", "--no-ticket"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Empty(t, svc.moveSessionCalls)
+	assert.Empty(t, svc.forkSessionCalls)
 }
 
 func TestNew_invalidShortNameFromService(t *testing.T) {
@@ -412,7 +455,7 @@ func TestNew_invalidTicketFromService(t *testing.T) {
 
 func TestNew_argRequired(t *testing.T) {
 	r := run(t, []string{"new"}, nil, nil)
-	assert.NotEqual(t, 0, r.exit)
+	assert.NotEqual(t, ExitOK, r.exit)
 }
 
 // --- new: phase 7 flags ----------------------------------------------
@@ -432,7 +475,7 @@ func TestNew_fromCurrent(t *testing.T) {
 	}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "parent", "repo-a"), nil }
 	r := runWithDeps(t, []string{"new", "child", "--no-ticket", "--from-current"}, cfg, svc, depsOpts{cwd: cwdFn})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, map[string]string{"repo-a": "ps--parent", "repo-b": "ps--parent"}, svc.newCalls[0].BaseByRepo)
 }
@@ -449,12 +492,11 @@ func TestNew_carryContext(t *testing.T) {
 	}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "abc-1--parent"), nil }
 	r := runWithDeps(t, []string{"new", "child", "--no-ticket", "--carry-context"}, cfg, svc, depsOpts{cwd: cwdFn})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	require.NotNil(t, svc.newCalls[0].CarryFrom)
 	assert.Equal(t, "abc-1--parent", svc.newCalls[0].CarryFrom.ParentName)
 	assert.Equal(t, "abc-1", svc.newCalls[0].CarryFrom.ParentTicket)
-	assert.Equal(t, "https://x/ABC-1", svc.newCalls[0].CarryFrom.ParentTicketURL)
 }
 
 func TestNew_fromCurrent_outsideWorkspace(t *testing.T) {
@@ -472,7 +514,7 @@ func TestNew_fromCurrent_outsideWorkspace(t *testing.T) {
 func TestNew_codeWorkspaceFlag(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	r := run(t, []string{"new", "x", "--no-ticket", "--code-workspace"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.True(t, svc.newCalls[0].GenerateCodeWorkspace)
 }
@@ -482,11 +524,11 @@ func TestNew_codeWorkspaceFlag(t *testing.T) {
 func TestNew_interactivePickAttachesTicket(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9"}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "abc-9", svc.newCalls[0].Ticket, "ticket lowercased and passed through")
 }
@@ -494,19 +536,19 @@ func TestNew_interactivePickAttachesTicket(t *testing.T) {
 func TestNew_interactiveSkipped(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Skip: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionSkip}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "", svc.newCalls[0].Ticket)
 }
 
 func TestNew_interactiveCancelled(t *testing.T) {
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Cancelled: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionCancelled}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, &fakeService{}, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
 	assert.Equal(t, ExitUsage, r.exit)
@@ -515,11 +557,11 @@ func TestNew_interactiveCancelled(t *testing.T) {
 func TestNew_interactiveCreatesTicket(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{NewTitle: "Fix the bug", NewDescription: "body line"}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionCreate, NewTitle: "Fix the bug", NewDescription: "body line"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "Fix the bug", lc.createCalls[0].Title)
 	assert.Equal(t, "body line", lc.createCalls[0].Description, "description from compose flow flows into linear create")
@@ -531,8 +573,8 @@ func TestNew_interactiveCreatesTicket(t *testing.T) {
 
 func TestNew_interactiveCreateFailureSurfaces(t *testing.T) {
 	lc := &fakeLinear{available: true, createErr: errors.New("linear down")}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{NewTitle: "Fix the bug"}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionCreate, NewTitle: "Fix the bug"}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, &fakeService{}, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
 	assert.Equal(t, ExitExternal, r.exit)
@@ -543,7 +585,7 @@ func TestNew_newTicketFlag(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
 	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "Fix the bug"}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "Fix the bug", lc.createCalls[0].Title)
 	assert.Empty(t, lc.createCalls[0].Description, "no --new-ticket-description means no description sent")
@@ -559,7 +601,7 @@ func TestNew_newTicketFlagWithDescription(t *testing.T) {
 		"--new-ticket", "Fix the bug",
 		"--new-ticket-description", "Repro steps here.\nLine two.",
 	}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "Fix the bug", lc.createCalls[0].Title)
 	assert.Equal(t, "Repro steps here.\nLine two.", lc.createCalls[0].Description)
@@ -596,12 +638,12 @@ func TestNew_newTicketSkipsInteractiveFlow(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-1--x", Path: "/p"}}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-1"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		flowCalled = true
-		return TicketFlowResult{}, nil
+		return tui.TicketFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--new-ticket", "Title"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled, "--new-ticket short-circuits the interactive ticket flow")
 }
 
@@ -624,12 +666,12 @@ func TestNew_noFlowWhenNotTTY(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		flowCalled = true
-		return TicketFlowResult{}, nil
+		return tui.TicketFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{linear: lc, tickFlow: flow, isTTY: func() bool { return false }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled, "flow must not run when stdin isn't a tty")
 	assert.Empty(t, svc.newCalls[0].Ticket)
 }
@@ -638,24 +680,24 @@ func TestNew_noFlowWhenLinearDisabled(t *testing.T) {
 	cfg := &config.Config{Root: "/tmp", BranchPrefix: "ps", Linear: config.LinearConfig{Enabled: false}}
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		flowCalled = true
-		return TicketFlowResult{}, nil
+		return tui.TicketFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x"}, cfg, svc, depsOpts{linear: &fakeLinear{available: true}, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled, "flow must not run when linear is disabled in config")
 }
 
 func TestNew_explicitNoTicketSkipsFlow(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		flowCalled = true
-		return TicketFlowResult{}, nil
+		return tui.TicketFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{linear: &fakeLinear{available: true}, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled)
 }
 
@@ -675,7 +717,7 @@ func TestNew_interactiveRepoPickerWiresSelection(t *testing.T) {
 		return RepoFlowResult{Repos: []string{"core", "infra"}}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, 1, svc.candidatesCalled)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, []string{"core", "infra"}, svc.newCalls[0].Repos)
@@ -699,7 +741,7 @@ func TestNew_interactiveRepoPickerSkippedByExplicitRepos(t *testing.T) {
 		return RepoFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket", "--repos", "a,b"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled, "explicit --repos must short-circuit the picker")
 	assert.Equal(t, 0, svc.candidatesCalled)
 	require.Len(t, svc.newCalls, 1)
@@ -714,7 +756,7 @@ func TestNew_interactiveRepoPickerSkippedWhenNotTTY(t *testing.T) {
 		return RepoFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return false }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled, "non-tty must keep the default+glob fallback")
 	assert.Equal(t, 0, svc.candidatesCalled)
 	require.Len(t, svc.newCalls, 1)
@@ -732,7 +774,7 @@ func TestNew_interactiveRepoPickerSkippedWhenNoCandidates(t *testing.T) {
 		return RepoFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, 1, svc.candidatesCalled)
 	assert.False(t, flowCalled, "no candidates -> picker not invoked, service surfaces the empty-root error")
 }
@@ -745,7 +787,7 @@ func TestNew_interactiveRepoPickerListErrorPropagates(t *testing.T) {
 		return RepoFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--no-ticket"}, nil, svc, depsOpts{repoFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, ExitExternal, r.exit)
+	assert.Equal(t, ExitGeneric, r.exit, "a candidate-listing failure is arat's own, not an external tool's")
 	assert.Contains(t, r.stderr, "disk on fire")
 	assert.False(t, flowCalled)
 }
@@ -753,19 +795,19 @@ func TestNew_interactiveRepoPickerListErrorPropagates(t *testing.T) {
 func TestNew_explicitTicketSkipsFlow(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	flowCalled := false
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		flowCalled = true
-		return TicketFlowResult{}, nil
+		return tui.TicketFlowResult{}, nil
 	}
 	r := runWithDeps(t, []string{"new", "x", "--ticket", "abc-1"}, nil, svc, depsOpts{linear: &fakeLinear{available: true}, tickFlow: flow, isTTY: func() bool { return true }})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.False(t, flowCalled)
 }
 
 func TestNew_json(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	r := run(t, []string{"new", "x", "--no-ticket", "--json"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, `"name": "x"`)
 	assert.Contains(t, r.stdout, `"path": "/p"`)
 }
@@ -775,7 +817,7 @@ func TestNew_json(t *testing.T) {
 func TestRm_happy(t *testing.T) {
 	svc := &fakeService{}
 	r := run(t, []string{"rm", "x"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "removed workspace x")
 	require.Len(t, svc.removeCalls, 1)
 	assert.False(t, svc.removeCalls[0].Force)
@@ -785,7 +827,7 @@ func TestRm_happy(t *testing.T) {
 func TestRm_force(t *testing.T) {
 	svc := &fakeService{}
 	r := run(t, []string{"rm", "x", "--force"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
 	assert.True(t, svc.removeCalls[0].Force)
 }
@@ -793,7 +835,7 @@ func TestRm_force(t *testing.T) {
 func TestRm_keepBranches(t *testing.T) {
 	svc := &fakeService{}
 	r := run(t, []string{"rm", "x", "--keep-branches"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
 	assert.True(t, svc.removeCalls[0].KeepBranches)
 }
@@ -801,7 +843,7 @@ func TestRm_keepBranches(t *testing.T) {
 func TestRm_alias_kill(t *testing.T) {
 	svc := &fakeService{}
 	r := run(t, []string{"kill", "x"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
 }
 
@@ -819,6 +861,95 @@ func TestRm_precondition(t *testing.T) {
 	assert.Contains(t, r.stderr, "--force to override")
 }
 
+func TestRm_scratchRefusedOutsideTerminal(t *testing.T) {
+	svc := &fakeService{removeScratchErr: &workspace.ErrScratchNotEmpty{
+		Contents: []workspace.ScratchContent{{Ref: "x", Files: []string{"notes.md"}}},
+	}}
+	r := run(t, []string{"rm", "x"}, nil, svc)
+	assert.Equal(t, ExitPrecondition, r.exit)
+	assert.Contains(t, r.stderr, "claude_workspace")
+	assert.Contains(t, r.stderr, "--force")
+	require.Len(t, svc.removeCalls, 1, "no retry without a way to ask")
+}
+
+func TestRm_scratchConfirmedInteractively(t *testing.T) {
+	svc := &fakeService{removeScratchErr: &workspace.ErrScratchNotEmpty{
+		Contents: []workspace.ScratchContent{{Ref: "x", Files: []string{"design/plan.md", "notes.md"}}},
+	}}
+	r := runWithDeps(t, []string{"rm", "x"}, nil, svc, depsOpts{
+		isTTY: func() bool { return true },
+		confirm: func(prompt string) (bool, error) {
+			assert.Contains(t, prompt, "permanently")
+			return true, nil
+		},
+	})
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	assert.Contains(t, r.stderr, "claude_workspace content in x")
+	assert.Contains(t, r.stderr, "└── notes.md", "content is listed as a tree")
+	assert.Contains(t, r.stderr, "plan.md")
+	require.Len(t, svc.removeCalls, 2, "refusal, then confirmed retry")
+	assert.False(t, svc.removeCalls[0].DeleteScratch)
+	assert.True(t, svc.removeCalls[1].DeleteScratch)
+	assert.Contains(t, r.stderr, "removed workspace x")
+}
+
+func TestRm_scratchDeclinedInteractively(t *testing.T) {
+	svc := &fakeService{removeScratchErr: &workspace.ErrScratchNotEmpty{
+		Contents: []workspace.ScratchContent{{Ref: "x", Files: []string{"notes.md"}}},
+	}}
+	r := runWithDeps(t, []string{"rm", "x"}, nil, svc, depsOpts{
+		isTTY:   func() bool { return true },
+		confirm: func(string) (bool, error) { return false, nil },
+	})
+	assert.Equal(t, ExitOK, r.exit, "declining the scratch prompt is not an error")
+	assert.Contains(t, r.stderr, "cancelled")
+	require.Len(t, svc.removeCalls, 1, "nothing retried when the user says N")
+}
+
+func TestRm_scratchSkippedWithForce(t *testing.T) {
+	svc := &fakeService{removeScratchErr: &workspace.ErrScratchNotEmpty{
+		Contents: []workspace.ScratchContent{{Ref: "x", Files: []string{"notes.md"}}},
+	}}
+	r := run(t, []string{"rm", "x", "--force"}, nil, svc)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	require.Len(t, svc.removeCalls, 1)
+	assert.NotContains(t, r.stderr, "claude_workspace", "--force asks nothing")
+}
+
+func TestRenderFileTree(t *testing.T) {
+	lines := renderFileTree([]string{"design/deep/x.md", "design/plan.md", "notes.md"})
+	assert.Equal(t, []string{
+		"├── design",
+		"│   ├── deep",
+		"│   │   └── x.md",
+		"│   └── plan.md",
+		"└── notes.md",
+	}, lines)
+}
+
+func TestRm_partialTeardownReported(t *testing.T) {
+	svc := &fakeService{
+		removeResult: &workspace.RemoveResult{RemovedWorktrees: []string{"/ws/x/repo-a"}},
+		removeErr:    fmt.Errorf("removed 1 of 2 worktrees, then: boom"),
+	}
+	r := run(t, []string{"rm", "x"}, nil, svc)
+	assert.NotEqual(t, ExitOK, r.exit)
+	assert.Contains(t, r.stderr, "partial teardown")
+	assert.Contains(t, r.stderr, "/ws/x/repo-a")
+	assert.Contains(t, r.stderr, "re-running the same rm continues")
+}
+
+func TestRm_branchWarningsPrinted(t *testing.T) {
+	svc := &fakeService{removeResult: &workspace.RemoveResult{
+		Removed:  []string{"x"},
+		Warnings: []string{"branch ps--x in /root/repo-a not deleted: in use"},
+	}}
+	r := run(t, []string{"rm", "x"}, nil, svc)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	assert.Contains(t, r.stderr, "removed workspace x")
+	assert.Contains(t, r.stderr, "⚠ branch ps--x in /root/repo-a not deleted: in use")
+}
+
 func TestRm_stashedReposSurfaceAsNote(t *testing.T) {
 	svc := &fakeService{removeResult: &workspace.RemoveResult{
 		StashedRepos: []workspace.StashedRepo{
@@ -827,7 +958,7 @@ func TestRm_stashedReposSurfaceAsNote(t *testing.T) {
 		},
 	}}
 	r := run(t, []string{"rm", "x"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "removed workspace x")
 	assert.Contains(t, r.stderr, "1 stash entry preserved in /root/repo-a")
 	assert.Contains(t, r.stderr, "3 stash entries preserved in /root/repo-b")
@@ -837,7 +968,7 @@ func TestRm_stashedReposSurfaceAsNote(t *testing.T) {
 func TestRm_noStashedReposNoNote(t *testing.T) {
 	svc := &fakeService{removeResult: &workspace.RemoveResult{}}
 	r := run(t, []string{"rm", "x"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.NotContains(t, r.stderr, "preserved", "no stashed repos -> no note line")
 }
 
@@ -854,7 +985,7 @@ func TestRm_pickerHappy(t *testing.T) {
 			return true, nil
 		},
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
 	assert.Equal(t, "b", svc.removeCalls[0].Name)
 	assert.Contains(t, r.stderr, "removed workspace b")
@@ -869,7 +1000,7 @@ func TestRm_pickerConfirmDeclined(t *testing.T) {
 		},
 		confirm: func(string) (bool, error) { return false, nil },
 	})
-	assert.Equal(t, 0, r.exit, "declining the confirm prompt is not an error")
+	assert.Equal(t, ExitOK, r.exit, "declining the confirm prompt is not an error")
 	assert.Empty(t, svc.removeCalls, "nothing removed when user says N")
 	assert.Contains(t, r.stderr, "cancelled")
 }
@@ -886,7 +1017,7 @@ func TestRm_pickerCancelled(t *testing.T) {
 			return false, nil
 		},
 	})
-	assert.Equal(t, 0, r.exit, "cancelling the picker is not an error")
+	assert.Equal(t, ExitOK, r.exit, "cancelling the picker is not an error")
 	assert.Empty(t, svc.removeCalls, "nothing removed on cancel")
 }
 
@@ -908,7 +1039,7 @@ func TestRm_byName_skipsConfirm(t *testing.T) {
 			return false, nil
 		},
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.removeCalls, 1)
 	assert.Equal(t, "x", svc.removeCalls[0].Name)
 }
@@ -918,7 +1049,7 @@ func TestRm_byName_skipsConfirm(t *testing.T) {
 func TestGo_byName(t *testing.T) {
 	svc := &fakeService{getResult: &workspace.Workspace{Name: "x", Path: "/wsx/x"}}
 	r := run(t, []string{"go", "x"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, "/wsx/x\n", r.stdout)
 	assert.Equal(t, []string{"x"}, svc.getCalls)
 }
@@ -939,9 +1070,11 @@ func TestGo_noNameOutsideTerminal(t *testing.T) {
 }
 
 func TestGo_noNameNoPickerWired(t *testing.T) {
-	// A tty but no wired picker should refuse cleanly rather than panic.
+	// A tty but no wired picker should refuse cleanly rather than panic —
+	// and as a wiring bug (exit 1), not a usage error: the user did nothing
+	// wrong.
 	r := runWithDeps(t, []string{"go"}, nil, nil, depsOpts{isTTY: func() bool { return true }})
-	assert.Equal(t, ExitUsage, r.exit)
+	assert.Equal(t, ExitGeneric, r.exit)
 	assert.Contains(t, r.stderr, "no PickWorkspace impl wired")
 }
 
@@ -952,7 +1085,7 @@ func TestGo_pickerHappy(t *testing.T) {
 		require.Len(t, items, 2)
 		return chosen, nil
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, "/b\n", r.stdout)
 }
 
@@ -961,7 +1094,7 @@ func TestGo_pickerCancelled(t *testing.T) {
 	r := runWithPicker(t, []string{"go"}, nil, svc, func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
 		return nil, nil // user cancelled
 	})
-	assert.Equal(t, 0, r.exit, "cancelling the picker is not an error")
+	assert.Equal(t, ExitOK, r.exit, "cancelling the picker is not an error")
 	assert.Empty(t, r.stdout, "no path is printed on cancel")
 }
 
@@ -979,14 +1112,14 @@ func TestGo_pickerError(t *testing.T) {
 	r := runWithPicker(t, []string{"go"}, nil, svc, func(context.Context, []workspace.Workspace, io.Writer) (*workspace.Workspace, error) {
 		return nil, fmt.Errorf("tui blew up")
 	})
-	assert.Equal(t, ExitExternal, r.exit)
+	assert.Equal(t, ExitGeneric, r.exit, "a TUI failure is arat's own, not an external tool's")
 	assert.Contains(t, r.stderr, "tui blew up")
 }
 
 func TestGo_printFlagAccepted(t *testing.T) {
 	svc := &fakeService{getResult: &workspace.Workspace{Name: "x", Path: "/p"}}
 	r := run(t, []string{"go", "--print", "x"}, nil, svc)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, "/p\n", r.stdout)
 }
 
@@ -994,21 +1127,21 @@ func TestGo_printFlagAccepted(t *testing.T) {
 
 func TestInit_zsh(t *testing.T) {
 	r := run(t, []string{"init", "zsh"}, nil, nil)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, "command arat")
 	assert.Contains(t, r.stdout, "zsh")
 }
 
 func TestInit_bash(t *testing.T) {
 	r := run(t, []string{"init", "bash"}, nil, nil)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, "command arat")
 	assert.Contains(t, r.stdout, "bash")
 }
 
 func TestInit_fish(t *testing.T) {
 	r := run(t, []string{"init", "fish"}, nil, nil)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stdout, "function arat")
 }
 
@@ -1024,7 +1157,7 @@ func TestTicketAttach_happy(t *testing.T) {
 		Workspace: &workspace.Workspace{Name: "abc-1--x", Path: "/p", Ticket: "abc-1"},
 	}}
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "abc-1"}, nil, svc, depsOpts{})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, "/p\n", r.stdout)
 	assert.Contains(t, r.stderr, "attached ABC-1 → abc-1--x")
 	require.Len(t, svc.attachCalls, 1)
@@ -1032,10 +1165,22 @@ func TestTicketAttach_happy(t *testing.T) {
 	assert.Equal(t, "abc-1", svc.attachCalls[0].Ticket, "ticket lowercased")
 }
 
+func TestTicketAttach_jsonMatchesAttach(t *testing.T) {
+	// The alias exists for script compatibility, so --json must emit the
+	// same record shape as its successor `arat attach`, not plain text.
+	svc := &fakeService{attachResult: &workspace.AttachResult{
+		Workspace: &workspace.Workspace{Name: "abc-1--x", Path: "/p", Ticket: "abc-1"},
+	}}
+	r := runWithDeps(t, []string{"ticket", "attach", "x", "abc-1", "--json"}, nil, svc, depsOpts{})
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
+	assert.Contains(t, r.stdout, `"path": "/p"`)
+	assert.NotContains(t, r.stdout, "/p\n\n", "no plain-text line alongside the JSON")
+}
+
 func TestTicketAttach_uppercaseTicketLowered(t *testing.T) {
 	svc := &fakeService{attachResult: &workspace.AttachResult{Workspace: &workspace.Workspace{Name: "abc-1--x", Path: "/p"}}}
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "ABC-1"}, nil, svc, depsOpts{})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.attachCalls, 1)
 	assert.Equal(t, "abc-1", svc.attachCalls[0].Ticket)
 }
@@ -1046,7 +1191,7 @@ func TestTicketAttach_warningsPrinted(t *testing.T) {
 		Warnings:  []workspace.AttachWarning{{Repo: "repo-b", Reason: "off branch"}},
 	}}
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "abc-1"}, nil, svc, depsOpts{})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "repo-b: off branch")
 }
 
@@ -1058,7 +1203,7 @@ func TestTicketAttach_sessionWarningsPrinted(t *testing.T) {
 		},
 	}}
 	r := runWithDeps(t, []string{"ticket", "attach", "x", "abc-1"}, nil, svc, depsOpts{})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "claude session -some-proj/dup.jsonl")
 }
 
@@ -1104,7 +1249,7 @@ func TestRepoAdd_explicitWorkspace(t *testing.T) {
 		}},
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "abc-1--x", "repo-b"}, cfg, svc, depsOpts{cwd: failingCwd(t)})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.addReposCalls, 1)
 	assert.Equal(t, "abc-1--x", svc.addReposCalls[0].Workspace)
 	assert.Equal(t, []string{"repo-b"}, svc.addReposCalls[0].Repos)
@@ -1130,7 +1275,7 @@ func TestRepoAdd_inferFromCwd(t *testing.T) {
 	}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "myws", "repo-a"), nil }
 	r := runWithDeps(t, []string{"repo", "add", "repo-b"}, cfg, svc, depsOpts{cwd: cwdFn})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.addReposCalls, 1)
 	assert.Equal(t, "myws", svc.addReposCalls[0].Workspace)
 }
@@ -1147,7 +1292,7 @@ func TestRepoAdd_multipleRepos(t *testing.T) {
 		}},
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "repo-b", "repo-c"}, nil, svc, depsOpts{cwd: failingCwd(t)})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.addReposCalls, 1)
 	assert.Equal(t, []string{"repo-b", "repo-c"}, svc.addReposCalls[0].Repos)
 }
@@ -1161,7 +1306,7 @@ func TestRepoAdd_baseFlag(t *testing.T) {
 		}},
 	}}
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x", "--base", "origin/main", "repo-b"}, nil, svc, depsOpts{cwd: failingCwd(t)})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.addReposCalls, 1)
 	assert.Equal(t, "origin/main", svc.addReposCalls[0].Base)
 }
@@ -1199,7 +1344,7 @@ func TestRepoAdd_outsideWorkspace(t *testing.T) {
 
 func TestRepoAdd_argRequired(t *testing.T) {
 	r := runWithDeps(t, []string{"repo", "add", "--workspace", "x"}, nil, nil, depsOpts{cwd: failingCwd(t)})
-	assert.NotEqual(t, 0, r.exit)
+	assert.NotEqual(t, ExitOK, r.exit)
 }
 
 // --- ticket create ---------------------------------------------------
@@ -1207,7 +1352,7 @@ func TestRepoAdd_argRequired(t *testing.T) {
 func TestTicketCreate_happy(t *testing.T) {
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9999", Raw: "Created ABC-9999"}}
 	r := runWithDeps(t, []string{"ticket", "create", "--title", "Fix it", "--project", "Side"}, nil, nil, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, "ABC-9999\n", r.stdout)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "Fix it", lc.createCalls[0].Title)
@@ -1219,7 +1364,7 @@ func TestTicketCreate_happy(t *testing.T) {
 func TestTicketCreate_explicitTeamAndState(t *testing.T) {
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ENG-1"}}
 	r := runWithDeps(t, []string{"ticket", "create", "--title", "x", "--team", "ENG", "--state", "In Progress"}, nil, nil, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "ENG", lc.createCalls[0].Team)
 	assert.Equal(t, "In Progress", lc.createCalls[0].State)
@@ -1228,7 +1373,7 @@ func TestTicketCreate_explicitTeamAndState(t *testing.T) {
 func TestTicketCreate_titleRequired(t *testing.T) {
 	lc := &fakeLinear{available: true}
 	r := runWithDeps(t, []string{"ticket", "create"}, nil, nil, depsOpts{linear: lc})
-	assert.NotEqual(t, 0, r.exit)
+	assert.NotEqual(t, ExitOK, r.exit)
 	assert.Empty(t, lc.createCalls, "linear must not be invoked without title")
 }
 
@@ -1264,7 +1409,7 @@ func TestNote_explicitName(t *testing.T) {
 	svc := &fakeService{getResult: &workspace.Workspace{Name: "abc-1--x", Ticket: "abc-1"}}
 	lc := &fakeLinear{available: true}
 	r := runWithDeps(t, []string{"note", "abc-1--x", "wip"}, cfg, svc, depsOpts{linear: lc, cwd: failingCwd(t)})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.commentCalls, 1)
 	assert.Equal(t, "abc-1", lc.commentCalls[0].IssueID)
 	assert.Equal(t, "wip", lc.commentCalls[0].Body)
@@ -1286,7 +1431,7 @@ func TestNote_explicitName_notADir_treatedAsBody(t *testing.T) {
 	lc := &fakeLinear{available: true}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "wsX", "sub"), nil }
 	r := runWithDeps(t, []string{"note", "definitely", "not", "a", "ws"}, cfg, svc, depsOpts{linear: lc, cwd: cwdFn})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.commentCalls, 1)
 	assert.Equal(t, "definitely not a ws", lc.commentCalls[0].Body)
 }
@@ -1304,7 +1449,7 @@ func TestNote_inferFromCwd(t *testing.T) {
 	lc := &fakeLinear{available: true}
 	cwdFn := func() (string, error) { return filepath.Join(wsDir, "myws"), nil }
 	r := runWithDeps(t, []string{"note", "looks", "good"}, cfg, svc, depsOpts{linear: lc, cwd: cwdFn})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.commentCalls, 1)
 	assert.Equal(t, "abc-9", lc.commentCalls[0].IssueID)
 	assert.Equal(t, "looks good", lc.commentCalls[0].Body)
@@ -1401,7 +1546,7 @@ func failingCwd(t *testing.T) func() (string, error) {
 
 func TestVersion(t *testing.T) {
 	r := run(t, []string{"version"}, nil, nil)
-	assert.Equal(t, 0, r.exit)
+	assert.Equal(t, ExitOK, r.exit)
 	assert.Regexp(t, `^arat .+\n$`, r.stdout)
 }
 
@@ -1410,7 +1555,7 @@ func TestVersion(t *testing.T) {
 func TestConfigPath(t *testing.T) {
 	t.Setenv("ARAT_CONFIG", "/from/env.toml")
 	r := run(t, []string{"config", "path"}, nil, nil)
-	assert.Equal(t, 0, r.exit)
+	assert.Equal(t, ExitOK, r.exit)
 	assert.Equal(t, "/from/env.toml\n", r.stdout)
 }
 
@@ -1418,7 +1563,7 @@ func TestConfigInit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cfg.toml")
 	r := run(t, []string{"--config", path, "config", "init"}, nil, nil)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, path+"\n", r.stdout)
 	_, err := os.Stat(path)
 	require.NoError(t, err)
@@ -1432,7 +1577,7 @@ func TestConfigInit_existsConflict(t *testing.T) {
 	assert.Equal(t, ExitConflict, r.exit)
 
 	r = run(t, []string{"--config", path, "config", "init", "--force"}, nil, nil)
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 }
 
 // --- global flags / wiring ------------------------------------------
@@ -1441,9 +1586,9 @@ func TestMissingConfig(t *testing.T) {
 	deps := Deps{
 		Stdout: io.Discard, Stderr: io.Discard,
 		NewConfig:  func(string) (*config.Config, error) { return nil, fmt.Errorf("%w: x", config.ErrNotFound) },
-		NewService: func(*config.Config) Service { return &fakeService{} },
+		NewService: func(*config.Config) (Service, error) { return &fakeService{}, nil },
 	}
-	assert.Equal(t, ExitConfig, Execute(deps, []string{"ls"}))
+	assert.Equal(t, ExitConfig, Execute(context.Background(), deps, []string{"ls"}))
 }
 
 func TestUnknownCommand(t *testing.T) {
@@ -1453,7 +1598,7 @@ func TestUnknownCommand(t *testing.T) {
 
 func TestRoot_helpExits0(t *testing.T) {
 	r := run(t, []string{"--help"}, nil, nil)
-	assert.Equal(t, 0, r.exit)
+	assert.Equal(t, ExitOK, r.exit)
 }
 
 // --- new: name derived from the issue title --------------------------
@@ -1462,7 +1607,7 @@ func TestNew_nameDerivedFromTicketFlagNonTTY(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "rex-666--fix-postal-race", Path: "/p"}}
 	lc := &fakeLinear{available: true, issueTitleResult: "REX-666: Fix postal race"}
 	r := runWithDeps(t, []string{"new", "--ticket", "rex-666"}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"rex-666"}, lc.issueTitleCalls)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "fix-postal-race", svc.newCalls[0].ShortName, "slug derived from the title, ticket prefix stripped")
@@ -1473,7 +1618,7 @@ func TestNew_nameDerivedFromNewTicketTitleNonTTY(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--fix-the-bug", Path: "/p"}}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-9"}}
 	r := runWithDeps(t, []string{"new", "--new-ticket", "Fix the bug"}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Empty(t, lc.issueTitleCalls, "the title is already in hand; no fetch")
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "fix-the-bug", svc.newCalls[0].ShortName)
@@ -1501,8 +1646,8 @@ func TestNew_titleFetchFailureNonTTY(t *testing.T) {
 func TestNew_interactivePickPrefillsNamePrompt(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--fix-postal-race", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9", TicketTitle: "Fix postal race"}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9", IssueTitle: "Fix postal race"}, nil
 	}
 	name := func(_ context.Context, def, ticket string, _ io.Writer) (NameFlowResult, error) {
 		assert.Equal(t, "fix-postal-race", def, "prompt pre-filled with the derived slug")
@@ -1512,7 +1657,7 @@ func TestNew_interactivePickPrefillsNamePrompt(t *testing.T) {
 	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{
 		linear: lc, tickFlow: flow, nameFlow: name, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Empty(t, lc.issueTitleCalls, "the pick carried the title; no fetch")
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "fix-postal-race", svc.newCalls[0].ShortName)
@@ -1522,9 +1667,9 @@ func TestNew_interactivePickPrefillsNamePrompt(t *testing.T) {
 func TestNew_interactiveSkipThenTypedNameIsTicketless(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "spike", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, opts TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, opts tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		assert.True(t, opts.AllowSkip, "skip stays available in the no-name flow")
-		return TicketFlowResult{Skip: true}, nil
+		return tui.TicketFlowResult{Action: tui.ActionSkip}, nil
 	}
 	name := func(_ context.Context, def, ticket string, _ io.Writer) (NameFlowResult, error) {
 		assert.Empty(t, def, "no ticket, no default")
@@ -1534,7 +1679,7 @@ func TestNew_interactiveSkipThenTypedNameIsTicketless(t *testing.T) {
 	r := runWithDeps(t, []string{"new"}, nil, svc, depsOpts{
 		linear: lc, tickFlow: flow, nameFlow: name, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "spike", svc.newCalls[0].ShortName)
 	assert.Equal(t, "", svc.newCalls[0].Ticket)
@@ -1543,8 +1688,8 @@ func TestNew_interactiveSkipThenTypedNameIsTicketless(t *testing.T) {
 func TestNew_interactiveSkipThenEmptyNameCancels(t *testing.T) {
 	svc := &fakeService{}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Skip: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionSkip}, nil
 	}
 	name := func(_ context.Context, _, _ string, _ io.Writer) (NameFlowResult, error) {
 		return NameFlowResult{Name: ""}, nil
@@ -1560,8 +1705,8 @@ func TestNew_interactiveSkipThenEmptyNameCancels(t *testing.T) {
 func TestNew_interactiveNamePromptCancelled(t *testing.T) {
 	svc := &fakeService{}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9", TicketTitle: "Fix postal race"}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9", IssueTitle: "Fix postal race"}, nil
 	}
 	name := func(_ context.Context, _, _ string, _ io.Writer) (NameFlowResult, error) {
 		return NameFlowResult{Cancelled: true}, nil
@@ -1583,7 +1728,7 @@ func TestNew_titleFetchFailureTTYFallsBackToEmptyPrompt(t *testing.T) {
 	r := runWithDeps(t, []string{"new", "--ticket", "rex-666"}, nil, svc, depsOpts{
 		linear: lc, nameFlow: name, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "could not fetch the title of REX-666")
 	require.Len(t, svc.newCalls, 1)
 	assert.Equal(t, "typed", svc.newCalls[0].ShortName)
@@ -1594,8 +1739,8 @@ func TestNew_titleFetchFailureTTYFallsBackToEmptyPrompt(t *testing.T) {
 func TestNew_pickUnassignedOffersAssign(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9", TicketTitle: "t", TicketUnassigned: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9", IssueTitle: "t", IssueUnassigned: true}, nil
 	}
 	var prompts []string
 	confirm := func(prompt string) (bool, error) {
@@ -1605,7 +1750,7 @@ func TestNew_pickUnassignedOffersAssign(t *testing.T) {
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
 		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, prompts, 1)
 	assert.Contains(t, prompts[0], "ABC-9 is unassigned")
 	assert.Equal(t, []string{"ABC-9"}, lc.assignMeCalls)
@@ -1615,14 +1760,14 @@ func TestNew_pickUnassignedOffersAssign(t *testing.T) {
 func TestNew_pickUnassignedDeclinedLeavesIt(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9", TicketUnassigned: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9", IssueUnassigned: true}, nil
 	}
 	confirm := func(string) (bool, error) { return false, nil }
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
 		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Empty(t, lc.assignMeCalls)
 	require.Len(t, svc.newCalls, 1, "declining assignment still creates the workspace")
 }
@@ -1630,8 +1775,8 @@ func TestNew_pickUnassignedDeclinedLeavesIt(t *testing.T) {
 func TestNew_pickAssignedNeverPrompts(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9", TicketUnassigned: false}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9", IssueUnassigned: false}, nil
 	}
 	confirm := func(string) (bool, error) {
 		t.Fatal("must not prompt for an issue that already has an assignee")
@@ -1640,21 +1785,21 @@ func TestNew_pickAssignedNeverPrompts(t *testing.T) {
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
 		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Empty(t, lc.assignMeCalls)
 }
 
 func TestNew_assignFailureIsAWarningNotAnError(t *testing.T) {
 	svc := &fakeService{newResult: &workspace.Workspace{Name: "abc-9--x", Path: "/p"}}
 	lc := &fakeLinear{available: true, assignMeErr: errors.New("api down")}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-9", TicketUnassigned: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-9", IssueUnassigned: true}, nil
 	}
 	confirm := func(string) (bool, error) { return true, nil }
 	r := runWithDeps(t, []string{"new", "x"}, nil, svc, depsOpts{
 		linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, "workspace creation must survive a failed assignment")
+	assert.Equal(t, ExitOK, r.exit, "workspace creation must survive a failed assignment")
 	assert.Contains(t, r.stderr, "could not assign ABC-9")
 	require.Len(t, svc.newCalls, 1)
 }
@@ -1662,13 +1807,13 @@ func TestNew_assignFailureIsAWarningNotAnError(t *testing.T) {
 func TestAttach_pickUnassignedOffersAssign(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS(), attachResult: attachedResult()}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Ticket: "ABC-7", TicketUnassigned: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-7", IssueUnassigned: true}, nil
 	}
 	confirm := func(string) (bool, error) { return true, nil }
 	r := runWithDeps(t, []string{"attach"}, nil, svc, depsOpts{
 		cwd: cwdIn("/ws/my-feat"), linear: lc, tickFlow: flow, confirm: confirm, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"ABC-7"}, lc.assignMeCalls)
 }

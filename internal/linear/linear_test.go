@@ -481,3 +481,41 @@ func TestIssueTitle_emptyTitleIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
+
+func TestToolFailuresCarryErrCmd(t *testing.T) {
+	// The cmd layer maps ErrCmd to the external-tool exit code, so runner
+	// errors, GraphQL error responses, and undecodable output must all carry
+	// it — while input-validation errors must not.
+	ctx := context.Background()
+
+	t.Run("runner error", func(t *testing.T) {
+		l := NewWithRunner(func(context.Context, string, ...string) ([]byte, []byte, error) {
+			return nil, []byte("boom"), errors.New("exit status 1")
+		})
+		_, err := l.IssueList(ctx, IssueListOptions{})
+		assert.ErrorIs(t, err, ErrCmd)
+	})
+	t.Run("graphql errors response", func(t *testing.T) {
+		l := NewWithRunner(func(context.Context, string, ...string) ([]byte, []byte, error) {
+			return []byte(`{"errors":[{"message":"rate limited"}]}`), nil, nil
+		})
+		_, err := l.IssueTitle(ctx, "ABC-1")
+		assert.ErrorIs(t, err, ErrCmd)
+	})
+	t.Run("undecodable output", func(t *testing.T) {
+		l := NewWithRunner(func(context.Context, string, ...string) ([]byte, []byte, error) {
+			return []byte("not json"), nil, nil
+		})
+		_, err := l.ContainerList(ctx, ContainerProject)
+		assert.ErrorIs(t, err, ErrCmd)
+	})
+	t.Run("validation error is not a tool failure", func(t *testing.T) {
+		l := NewWithRunner(func(context.Context, string, ...string) ([]byte, []byte, error) {
+			t.Fatal("runner must not be called")
+			return nil, nil, nil
+		})
+		_, err := l.IssueCreate(ctx, IssueCreateOptions{})
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, ErrCmd)
+	})
+}

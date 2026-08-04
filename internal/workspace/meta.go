@@ -68,9 +68,12 @@ func ValidLinearKind(k string) bool {
 // readMeta loads MetaFile from a workspace directory.
 //
 // A missing file is not an error: it yields (nil, nil), which callers treat
-// as "task workspace, no Linear reference". A malformed file *is* an error —
-// silently downgrading a project to a task would make `arat rm` skip the
-// child-workspace safety checks.
+// as "task workspace, no Linear reference". A file that exists but cannot be
+// read or parsed *is* an error — but hydrateDir scopes that fault to the one
+// workspace (Workspace.MetaError) rather than failing the tree walk, so a
+// single bad marker cannot take `ls`, `go`, or `rm` down for the whole tree.
+// Structural operations check the fault via errIfMetaBroken before trusting
+// the degraded task kind.
 func readMeta(dir string) (*Meta, error) {
 	data, err := os.ReadFile(filepath.Join(dir, MetaFile))
 	if err != nil {
@@ -133,4 +136,16 @@ func writeMeta(dir string, m Meta) error {
 func hasMeta(dir string) bool {
 	_, err := os.Stat(filepath.Join(dir, MetaFile))
 	return err == nil
+}
+
+// errIfMetaBroken refuses to build on a workspace whose marker could not be
+// read: its kind is a guess, so nesting under it, attaching an issue, or
+// (un)linking Linear could all act on the wrong sort of workspace. Remove
+// deliberately does not call this — deleting the workspace (or fixing the
+// file) is exactly how the fault gets repaired.
+func errIfMetaBroken(ws *Workspace) error {
+	if ws.MetaError == "" {
+		return nil
+	}
+	return fmt.Errorf("%w: %s has an unreadable workspace marker (%s) — fix or delete the file, or remove the workspace", ErrInvalidInput, ws.Ref, ws.MetaError)
 }

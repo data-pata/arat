@@ -8,27 +8,35 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/pelletier/go-toml/v2"
 )
 
 // Config is the resolved, validated configuration.
 type Config struct {
-	Root                  string       `toml:"root"`
-	WorkspacesDir         string       `toml:"workspaces_dir"`
-	BranchPrefix          string       `toml:"branch_prefix"`
-	TicketPattern         string       `toml:"ticket_pattern"`
-	TicketURL             string       `toml:"ticket_url"`
-	DefaultRepos          []string     `toml:"default_repos"`
-	AutoReposGlob         []string     `toml:"auto_repos_glob"`
-	GenerateCodeWorkspace bool         `toml:"generate_code_workspace"`
-	Linear                LinearConfig `toml:"linear"`
-	TUI                   TUIConfig    `toml:"tui"`
+	Root                  string   `toml:"root"`
+	WorkspacesDir         string   `toml:"workspaces_dir"`
+	BranchPrefix          string   `toml:"branch_prefix"`
+	TicketPattern         string   `toml:"ticket_pattern"`
+	TicketURL             string   `toml:"ticket_url"`
+	DefaultRepos          []string `toml:"default_repos"`
+	AutoReposGlob         []string `toml:"auto_repos_glob"`
+	GenerateCodeWorkspace bool     `toml:"generate_code_workspace"`
+	// CommandTimeout bounds each git / linear subprocess, as a Go duration
+	// string ("5m", "90s"); "0" disables the bound. Defaults to 5m: generous
+	// enough that a slow fetch is never killed, finite so a network black
+	// hole cannot hang arat forever. Per subprocess, not per arat command —
+	// a 25-repo `arat new` gives every fetch its own budget.
+	CommandTimeout string       `toml:"command_timeout"`
+	Linear         LinearConfig `toml:"linear"`
+	TUI            TUIConfig    `toml:"tui"`
 
 	// Path is the file the config was loaded from. Empty if defaults-only.
 	Path string `toml:"-"`
 
-	ticketRE *regexp.Regexp
+	ticketRE       *regexp.Regexp
+	commandTimeout time.Duration
 }
 
 type LinearConfig struct {
@@ -43,6 +51,11 @@ type TUIConfig struct {
 
 // TicketRegex returns the compiled ticket pattern.
 func (c *Config) TicketRegex() *regexp.Regexp { return c.ticketRE }
+
+// CommandTimeoutDuration returns the parsed per-subprocess timeout. Zero
+// means no bound. Only configs that went through Load carry the 5m default;
+// a zero-value Config (tests) runs unbounded.
+func (c *Config) CommandTimeoutDuration() time.Duration { return c.commandTimeout }
 
 // ResolvePath returns the config file path arat would load given the env, in order:
 //  1. explicit (when non-empty) — returned as-is
@@ -125,6 +138,16 @@ func (c *Config) applyDefaultsAndValidate() error {
 	}
 	c.ticketRE = re
 
+	if c.CommandTimeout == "" {
+		c.commandTimeout = 5 * time.Minute
+	} else {
+		d, err := time.ParseDuration(c.CommandTimeout)
+		if err != nil || d < 0 {
+			return fmt.Errorf("config: command_timeout %q invalid: want a Go duration like \"5m\" (\"0\" disables)", c.CommandTimeout)
+		}
+		c.commandTimeout = d
+	}
+
 	if c.TUI.Theme == "" {
 		c.TUI.Theme = "auto"
 	}
@@ -174,6 +197,11 @@ default_repos = []
 # Generate a .code-workspace file alongside the workspace dir.
 generate_code_workspace = false
 
+# Timeout for each git / linear subprocess (Go duration; "0" disables).
+# Generous by default so a slow fetch survives, finite so a hung network
+# call cannot hang arat forever.
+# command_timeout = "5m"
+
 [linear]
 enabled       = false
 # default_team  = "ABC"
@@ -202,7 +230,10 @@ var ErrExists = errors.New("config already exists")
 
 func expand(p string) (string, error) {
 	p = os.ExpandEnv(p)
-	if strings.HasPrefix(p, "~") {
+	// Only the caller's own home is expanded: "~" and "~/x". A "~user/x"
+	// path is left untouched — mapping it onto $HOME/user/x (what a blind
+	// TrimPrefix does) would silently point the config at the wrong place.
+	if p == "~" || strings.HasPrefix(p, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err

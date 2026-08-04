@@ -8,6 +8,7 @@ import (
 
 	"github.com/data-pata/arat/internal/config"
 	"github.com/data-pata/arat/internal/linear"
+	"github.com/data-pata/arat/internal/tui"
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,7 +43,7 @@ func cwdIn(dir string) func() (string, error) {
 func TestAttach_taskTicketFromCwd(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS(), attachResult: attachedResult()}
 	r := runWithDeps(t, []string{"attach", "abc-123"}, nil, svc, depsOpts{cwd: cwdIn("/ws/my-feat")})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.attachCalls, 1)
 	assert.Equal(t, "my-feat", svc.attachCalls[0].Name)
 	assert.Equal(t, "abc-123", svc.attachCalls[0].Ticket)
@@ -56,7 +57,7 @@ func TestAttach_taskExplicitRefAndTicket(t *testing.T) {
 		attachResult: attachedResult(),
 	}
 	r := runWithDeps(t, []string{"attach", "my-feat", "ABC-123"}, nil, svc, depsOpts{})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.attachCalls, 1)
 	assert.Equal(t, "my-feat", svc.attachCalls[0].Name)
 	assert.Equal(t, "abc-123", svc.attachCalls[0].Ticket, "ticket is lowercased before the domain call")
@@ -65,7 +66,7 @@ func TestAttach_taskExplicitRefAndTicket(t *testing.T) {
 func TestAttach_taskJSON(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS(), attachResult: attachedResult()}
 	r := runWithDeps(t, []string{"attach", "abc-123", "--json"}, nil, svc, depsOpts{cwd: cwdIn("/ws/my-feat")})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	var got workspace.Workspace
 	require.NoError(t, json.Unmarshal([]byte(r.stdout), &got))
 	assert.Equal(t, "abc-123--my-feat", got.Ref)
@@ -77,7 +78,7 @@ func TestAttach_taskNew(t *testing.T) {
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-123"}}
 	r := runWithDeps(t, []string{"attach", "--new", "Fix the race", "-d", "body"}, nil, svc,
 		depsOpts{cwd: cwdIn("/ws/my-feat"), linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "Fix the race", lc.createCalls[0].Title)
 	assert.Equal(t, "body", lc.createCalls[0].Description)
@@ -94,7 +95,7 @@ func TestAttach_taskNewWithExplicitRef(t *testing.T) {
 	}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-123"}}
 	r := runWithDeps(t, []string{"attach", "my-feat", "--new", "Fix the race"}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, svc.getCalls, "my-feat", "a lone positional under --new is the workspace ref")
 	require.Len(t, svc.attachCalls, 1)
 }
@@ -111,15 +112,15 @@ func TestAttach_taskNoArgNonTTY(t *testing.T) {
 func TestAttach_taskInteractiveFlowPick(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS(), attachResult: attachedResult()}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, opts TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
+	flow := func(_ context.Context, _ linear.Reader, opts tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
 		assert.False(t, opts.AllowSkip, "attach has nothing to skip to")
 		assert.Equal(t, "ABC", opts.Team)
-		return TicketFlowResult{Ticket: "ABC-7"}, nil
+		return tui.TicketFlowResult{Action: tui.ActionPick, IssueID: "ABC-7"}, nil
 	}
 	r := runWithDeps(t, []string{"attach"}, nil, svc, depsOpts{
 		cwd: cwdIn("/ws/my-feat"), linear: lc, tickFlow: flow, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.attachCalls, 1)
 	assert.Equal(t, "abc-7", svc.attachCalls[0].Ticket)
 }
@@ -127,13 +128,13 @@ func TestAttach_taskInteractiveFlowPick(t *testing.T) {
 func TestAttach_taskInteractiveFlowCreate(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS(), attachResult: attachedResult()}
 	lc := &fakeLinear{available: true, createResult: linear.IssueResult{ID: "ABC-123"}}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{NewTitle: "Typed inline", NewDescription: "desc"}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionCreate, NewTitle: "Typed inline", NewDescription: "desc"}, nil
 	}
 	r := runWithDeps(t, []string{"attach"}, nil, svc, depsOpts{
 		cwd: cwdIn("/ws/my-feat"), linear: lc, tickFlow: flow, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.createCalls, 1)
 	assert.Equal(t, "Typed inline", lc.createCalls[0].Title)
 	require.Len(t, svc.attachCalls, 1)
@@ -143,8 +144,8 @@ func TestAttach_taskInteractiveFlowCreate(t *testing.T) {
 func TestAttach_taskInteractiveFlowCancelled(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS()}
 	lc := &fakeLinear{available: true}
-	flow := func(_ context.Context, _ linear.Reader, _ TicketFlowOptions, _ io.Writer) (TicketFlowResult, error) {
-		return TicketFlowResult{Cancelled: true}, nil
+	flow := func(_ context.Context, _ linear.Reader, _ tui.TicketFlowOptions, _ io.Writer) (tui.TicketFlowResult, error) {
+		return tui.TicketFlowResult{Action: tui.ActionCancelled}, nil
 	}
 	r := runWithDeps(t, []string{"attach"}, nil, svc, depsOpts{
 		cwd: cwdIn("/ws/my-feat"), linear: lc, tickFlow: flow, isTTY: func() bool { return true },
@@ -166,7 +167,7 @@ func TestAttach_projectByName(t *testing.T) {
 		linear.ContainerInitiative: {{Kind: "initiative", ID: "slug2", Name: "Payments", URL: "https://l/i/slug2"}},
 	}}
 	r := runWithDeps(t, []string{"attach", "q3", "q3 billing"}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.ElementsMatch(t, []string{"project", "initiative"}, lc.containerCalls, "both kinds are searched")
 	require.Len(t, svc.linkCalls, 1)
 	assert.Equal(t, "q3", svc.linkCalls[0].Ref)
@@ -184,7 +185,7 @@ func TestAttach_projectInitiativeBySlug(t *testing.T) {
 		linear.ContainerInitiative: {{Kind: "initiative", ID: "slug2", Name: "Payments"}},
 	}}
 	r := runWithDeps(t, []string{"attach", "q3", "slug2"}, nil, svc, depsOpts{linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.linkCalls, 1)
 	assert.Equal(t, "initiative", svc.linkCalls[0].Linear.Kind)
 }
@@ -223,7 +224,7 @@ func TestAttach_projectNew(t *testing.T) {
 	}}
 	r := runWithDeps(t, []string{"attach", "--new", "New Proj", "-d", "why"}, nil, svc,
 		depsOpts{cwd: cwdIn("/ws/q3"), linear: lc})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, lc.projectCreateCalls, 1)
 	assert.Equal(t, "New Proj", lc.projectCreateCalls[0].Name)
 	assert.Equal(t, "ABC", lc.projectCreateCalls[0].Team)
@@ -257,7 +258,7 @@ func TestAttach_projectInteractivePick(t *testing.T) {
 	r := runWithDeps(t, []string{"attach"}, nil, svc, depsOpts{
 		cwd: cwdIn("/ws/q3"), linear: lc, pickContainer: picker, isTTY: func() bool { return true },
 	})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	require.Len(t, svc.linkCalls, 1)
 	assert.Equal(t, "slug1", svc.linkCalls[0].Linear.ID)
 }
@@ -313,7 +314,7 @@ func TestDetach_project(t *testing.T) {
 		unlinkResult: attachProjectWS(),
 	}
 	r := runWithDeps(t, []string{"detach", "q3"}, nil, svc, depsOpts{})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"q3"}, svc.unlinkCalls)
 	assert.Contains(t, r.stdout, "/ws/q3")
 	assert.Contains(t, r.stderr, "unlinked q3")
@@ -322,7 +323,7 @@ func TestDetach_project(t *testing.T) {
 func TestDetach_projectFromCwd(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachProjectWS(), unlinkResult: attachProjectWS()}
 	r := runWithDeps(t, []string{"detach"}, nil, svc, depsOpts{cwd: cwdIn("/ws/q3")})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Equal(t, []string{"q3"}, svc.unlinkCalls)
 }
 
@@ -340,7 +341,7 @@ func TestDetach_taskWithTicketRefuses(t *testing.T) {
 func TestDetach_taskWithoutTicketIsNoop(t *testing.T) {
 	svc := &fakeService{workspaceAtRes: attachTaskWS()}
 	r := runWithDeps(t, []string{"detach"}, nil, svc, depsOpts{cwd: cwdIn("/ws/my-feat")})
-	assert.Equal(t, 0, r.exit, r.stderr)
+	assert.Equal(t, ExitOK, r.exit, r.stderr)
 	assert.Contains(t, r.stderr, "nothing to detach")
 	assert.Empty(t, svc.unlinkCalls)
 }

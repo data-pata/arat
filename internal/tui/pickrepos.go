@@ -169,11 +169,11 @@ func PickRepos(ctx context.Context, candidates []workspace.RepoCandidate, out io
 	if rm.cancelled {
 		return nil, true, nil
 	}
-	out_ := make([]string, 0, len(rm.states))
+	picked := make([]string, 0, len(rm.states))
 	for _, s := range rm.states {
 		if s.checked {
-			out_ = append(out_, s.name)
+			picked = append(picked, s.name)
 		}
 	}
-	return out_, false, nil
+	return picked, false, nil
 }

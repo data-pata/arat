@@ -72,6 +72,13 @@ func (s *Service) ProjectAt(ctx context.Context, dir string) (*Workspace, error)
 		return nil, err
 	}
 	for {
+		// A broken marker on the walk up means the chain's kinds cannot be
+		// trusted: the broken workspace might itself be the project. Fail
+		// loudly rather than silently inferring "no project" and letting
+		// `arat new` create the workspace at the top level by accident.
+		if err := errIfMetaBroken(ws); err != nil {
+			return nil, err
+		}
 		if ws.IsProject() {
 			return ws, nil
 		}

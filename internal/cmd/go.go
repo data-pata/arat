@@ -49,7 +49,10 @@ default today.
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 
 			if len(args) == 0 {
 				return s.runPicker(cmd, svc)
@@ -66,7 +69,7 @@ default today.
 					// external tool flaking — exit 2, matching rm.
 					return &exitErr{code: ExitUsage, err: err}
 				}
-				return &exitErr{code: ExitExternal, err: err}
+				return mapUnclassifiedError(err)
 			}
 			s.writer().JSONRecord(ws, func(out io.Writer) {
 				fmt.Fprintln(out, ws.Path)
@@ -113,14 +116,16 @@ func (s *state) pickWorkspaceInteractive(cmd *cobra.Command, svc Service) (*work
 		return nil, &exitErr{code: ExitUsage, err: errors.New("a workspace ref is required outside a terminal")}
 	}
 	if s.deps.PickWorkspace == nil {
-		return nil, &exitErr{code: ExitUsage, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
+		// A terminal without a picker impl is a wiring bug in the embedding
+		// binary, not a user mistake — exit 1.
+		return nil, &exitErr{code: ExitGeneric, err: errors.New("interactive picker not available (no PickWorkspace impl wired)")}
 	}
-	tree, err := svc.ListShallow(cmd.Context())
+	tree, err := svc.List(cmd.Context(), workspace.ListOptions{Detail: workspace.DetailBare})
 	if err != nil {
 		if errors.Is(err, workspace.ErrNoWorkspacesDir) {
 			return nil, &exitErr{code: ExitNotFound, err: errors.New("no workspaces yet")}
 		}
-		return nil, &exitErr{code: ExitExternal, err: err}
+		return nil, mapUnclassifiedError(err)
 	}
 	// Flatten so nested workspaces are selectable directly. Projects stay in
 	// the list: jumping to a project is how you get to its shared CLAUDE.md
@@ -141,7 +146,7 @@ func (s *state) pickWorkspaceInteractive(cmd *cobra.Command, svc Service) (*work
 	})
 	chosen, err := s.deps.PickWorkspace(cmd.Context(), items, s.deps.Stderr)
 	if err != nil {
-		return nil, &exitErr{code: ExitExternal, err: err}
+		return nil, &exitErr{code: ExitGeneric, err: err}
 	}
 	return chosen, nil
 }

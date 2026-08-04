@@ -12,11 +12,42 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"regexp"
 	"strings"
+	"time"
 )
+
+// ErrCmd is matched (errors.Is) by every error this package returns for a
+// failing `linear` tool: a subprocess that errored, a GraphQL error response,
+// or output that could not be decoded. Callers use it to classify a failure
+// as "the external tool failed" — arat's exit 6 — without string matching.
+// Input-validation errors (empty title, empty id) do not carry it.
+var ErrCmd = errors.New("linear command failed")
+
+// cmdError carries the rendered message while matching both ErrCmd and the
+// underlying error (when there is one) via the multi-error Unwrap.
+type cmdError struct {
+	msg string
+	err error
+}
+
+func (e *cmdError) Error() string { return e.msg }
+func (e *cmdError) Unwrap() []error {
+	if e.err == nil {
+		return []error{ErrCmd}
+	}
+	return []error{ErrCmd, e.err}
+}
+
+// cmdErrorf wraps a tool failure with a printf-rendered message. err may be
+// nil for tool-level failures with no underlying Go error (a GraphQL error
+// response, pagination that never terminates).
+func cmdErrorf(err error, format string, args ...any) error {
+	return &cmdError{msg: fmt.Sprintf(format, args...), err: err}
+}
 
 // Runner runs an external command and returns stdout, stderr, and any error.
 // Tests inject a fake; production uses execRunner.
@@ -28,8 +59,47 @@ type Linear struct{ run Runner }
 // New returns a Linear that shells out to the real `linear` binary on PATH.
 func New() *Linear { return &Linear{run: execRunner} }
 
+// NewWithTimeout is New with a deadline on every subprocess. Zero d means no
+// deadline. Per invocation: a paginated listing gets the budget per page,
+// not for the whole loop.
+func NewWithTimeout(d time.Duration) *Linear { return &Linear{run: timeoutRunner(execRunner, d)} }
+
+// NewTraced is NewWithTimeout with a one-line trace per subprocess written
+// to w (argv, duration, failure if any), wired from the ARAT_TRACE env var.
+func NewTraced(d time.Duration, w io.Writer) *Linear {
+	return &Linear{run: traceRunner(timeoutRunner(execRunner, d), w)}
+}
+
 // NewWithRunner returns a Linear using the given Runner. Used by tests.
 func NewWithRunner(r Runner) *Linear { return &Linear{run: r} }
+
+// timeoutRunner bounds each invocation of r with its own deadline.
+func timeoutRunner(r Runner, d time.Duration) Runner {
+	if d <= 0 {
+		return r
+	}
+	return func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+		ctx, cancel := context.WithTimeout(ctx, d)
+		defer cancel()
+		return r(ctx, name, args...)
+	}
+}
+
+// traceRunner logs each invocation of r to w after it completes. Wrapped
+// outside the timeout so the logged duration includes a deadline kill.
+func traceRunner(r Runner, w io.Writer) Runner {
+	return func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+		start := time.Now()
+		stdout, stderr, err := r(ctx, name, args...)
+		status := "ok"
+		if err != nil {
+			status = err.Error()
+		}
+		fmt.Fprintf(w, "trace: %s %s %s [%s]\n",
+			name, strings.Join(args, " "), time.Since(start).Round(time.Millisecond), status)
+		return stdout, stderr, err
+	}
+}
 
 func execRunner(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
@@ -119,7 +189,7 @@ func (l *Linear) IssueCreate(ctx context.Context, opts IssueCreateOptions) (Issu
 	out := string(stdout)
 	if err != nil {
 		return IssueResult{Raw: combineOutput(out, string(stderr))},
-			fmt.Errorf("linear issue create: %w: %s", err, strings.TrimSpace(string(stderr)))
+			cmdErrorf(err, "linear issue create: %s: %v", strings.TrimSpace(string(stderr)), err)
 	}
 	return IssueResult{ID: parseIssueID(out), Raw: combineOutput(out, string(stderr))}, nil
 }
@@ -178,7 +248,7 @@ func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue,
 
 		stdout, stderr, err := l.run(ctx, "linear", "api", query)
 		if err != nil {
-			return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+			return nil, cmdErrorf(err, "linear api: %s: %v", strings.TrimSpace(string(stderr)), err)
 		}
 
 		var resp struct {
@@ -207,10 +277,10 @@ func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue,
 			} `json:"errors"`
 		}
 		if err := json.Unmarshal(stdout, &resp); err != nil {
-			return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+			return nil, cmdErrorf(err, "decode linear api response: %v (output: %s)", err, strings.TrimSpace(string(stdout)))
 		}
 		if len(resp.Errors) > 0 {
-			return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+			return nil, cmdErrorf(nil, "linear api: %s", resp.Errors[0].Message)
 		}
 
 		data := resp.Data.Issues
@@ -232,7 +302,7 @@ func (l *Linear) IssueList(ctx context.Context, opts IssueListOptions) ([]Issue,
 		}
 		cursor = data.PageInfo.EndCursor
 	}
-	return nil, fmt.Errorf("linear api: issues pagination did not terminate after %d pages", issueMaxPages)
+	return nil, cmdErrorf(nil, "linear api: issues pagination did not terminate after %d pages", issueMaxPages)
 }
 
 // IssueAssignMe assigns the issue to the authenticated viewer, via
@@ -244,7 +314,7 @@ func (l *Linear) IssueAssignMe(ctx context.Context, id string) error {
 	}
 	_, stderr, err := l.run(ctx, "linear", "issue", "update", id, "--assignee", "self")
 	if err != nil {
-		return fmt.Errorf("linear issue update %s --assignee self: %w: %s", id, err, strings.TrimSpace(string(stderr)))
+		return cmdErrorf(err, "linear issue update %s --assignee self: %s: %v", id, strings.TrimSpace(string(stderr)), err)
 	}
 	return nil
 }
@@ -261,7 +331,7 @@ func (l *Linear) IssueTitle(ctx context.Context, id string) (string, error) {
 
 	stdout, stderr, err := l.run(ctx, "linear", "api", query)
 	if err != nil {
-		return "", fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return "", cmdErrorf(err, "linear api: %s: %v", strings.TrimSpace(string(stderr)), err)
 	}
 	var resp struct {
 		Data struct {
@@ -274,10 +344,10 @@ func (l *Linear) IssueTitle(ctx context.Context, id string) (string, error) {
 		} `json:"errors"`
 	}
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return "", fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+		return "", cmdErrorf(err, "decode linear api response: %v (output: %s)", err, strings.TrimSpace(string(stdout)))
 	}
 	if len(resp.Errors) > 0 {
-		return "", fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+		return "", cmdErrorf(nil, "linear api: %s", resp.Errors[0].Message)
 	}
 	if resp.Data.Issue.Title == "" {
 		return "", fmt.Errorf("issue %s not found (or has no title)", id)
@@ -355,7 +425,7 @@ func (l *Linear) ContainerList(ctx context.Context, kind string) ([]Container, e
 
 		stdout, stderr, err := l.run(ctx, "linear", "api", query)
 		if err != nil {
-			return nil, fmt.Errorf("linear api: %w: %s", err, strings.TrimSpace(string(stderr)))
+			return nil, cmdErrorf(err, "linear api: %s: %v", strings.TrimSpace(string(stderr)), err)
 		}
 
 		var resp struct {
@@ -375,10 +445,10 @@ func (l *Linear) ContainerList(ctx context.Context, kind string) ([]Container, e
 			} `json:"errors"`
 		}
 		if err := json.Unmarshal(stdout, &resp); err != nil {
-			return nil, fmt.Errorf("decode linear api response: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+			return nil, cmdErrorf(err, "decode linear api response: %v (output: %s)", err, strings.TrimSpace(string(stdout)))
 		}
 		if len(resp.Errors) > 0 {
-			return nil, fmt.Errorf("linear api: %s", resp.Errors[0].Message)
+			return nil, cmdErrorf(nil, "linear api: %s", resp.Errors[0].Message)
 		}
 
 		data := resp.Data[root]
@@ -390,7 +460,7 @@ func (l *Linear) ContainerList(ctx context.Context, kind string) ([]Container, e
 		}
 		cursor = data.PageInfo.EndCursor
 	}
-	return nil, fmt.Errorf("linear api: %s pagination did not terminate after %d pages", root, containerMaxPages)
+	return nil, cmdErrorf(nil, "linear api: %s pagination did not terminate after %d pages", root, containerMaxPages)
 }
 
 // ProjectCreateOptions controls ProjectCreate.
@@ -434,7 +504,7 @@ func (l *Linear) ProjectCreate(ctx context.Context, opts ProjectCreateOptions) (
 
 	stdout, stderr, err := l.run(ctx, "linear", args...)
 	if err != nil {
-		return Container{}, fmt.Errorf("linear project create: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return Container{}, cmdErrorf(err, "linear project create: %s: %v", strings.TrimSpace(string(stderr)), err)
 	}
 
 	// Shape per linear-cli: {"success": bool, "project": {id, slugId, name, url}}.
@@ -447,10 +517,10 @@ func (l *Linear) ProjectCreate(ctx context.Context, opts ProjectCreateOptions) (
 		} `json:"project"`
 	}
 	if err := json.Unmarshal(stdout, &resp); err != nil {
-		return Container{}, fmt.Errorf("decode linear project create output: %w (output: %s)", err, strings.TrimSpace(string(stdout)))
+		return Container{}, cmdErrorf(err, "decode linear project create output: %v (output: %s)", err, strings.TrimSpace(string(stdout)))
 	}
 	if resp.Project.SlugID == "" {
-		return Container{}, fmt.Errorf("linear project create: no project in response (output: %s)", strings.TrimSpace(string(stdout)))
+		return Container{}, cmdErrorf(nil, "linear project create: no project in response (output: %s)", strings.TrimSpace(string(stdout)))
 	}
 	return Container{
 		Kind: ContainerProject,
@@ -494,7 +564,7 @@ func (l *Linear) CommentAdd(ctx context.Context, opts CommentAddOptions) error {
 
 	_, stderr, err := l.run(ctx, "linear", args...)
 	if err != nil {
-		return fmt.Errorf("linear issue comment add: %w: %s", err, strings.TrimSpace(string(stderr)))
+		return cmdErrorf(err, "linear issue comment add: %s: %v", strings.TrimSpace(string(stderr)), err)
 	}
 	return nil
 }

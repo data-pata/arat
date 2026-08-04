@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/data-pata/arat/internal/linear"
+	"github.com/data-pata/arat/internal/tui"
 	"github.com/data-pata/arat/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -22,6 +23,7 @@ func newNewCmd(s *state) *cobra.Command {
 		fromCurrent          bool
 		carryContext         bool
 		carrySession         string
+		forkSession          string
 		codeWorkspace        bool
 		projectMode          bool
 		in                   string
@@ -123,12 +125,20 @@ default_repos and auto_repos_glob.
 			if fromParent && fromCurrent {
 				return &exitErr{code: ExitUsage, err: errors.New("--from-parent and --from-current are mutually exclusive: they name different branches to start from")}
 			}
+			// Both act on a session jsonl but disagree on what happens to the
+			// original: carry moves it, fork copies it under a new id.
+			if carrySession != "" && forkSession != "" {
+				return &exitErr{code: ExitUsage, err: errors.New("--carry-session and --fork-session are mutually exclusive: carry moves the original session, fork copies it under a new id")}
+			}
 
 			cfg, err := s.loadConfig()
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 
 			parent, err := resolveNewParent(cmd.Context(), svc, s.deps.Cwd, in, projectMode)
 			if err != nil {
@@ -150,12 +160,12 @@ default_repos and auto_repos_glob.
 			if len(repos) == 0 && !projectMode && isInteractive(s.deps) && s.deps.RepoFlow != nil {
 				cands, err := svc.ListRepoCandidates()
 				if err != nil {
-					return &exitErr{code: ExitExternal, err: err}
+					return mapUnclassifiedError(err)
 				}
 				if len(cands) > 0 {
 					res, err := s.deps.RepoFlow(cmd.Context(), cands, s.deps.Stderr)
 					if err != nil {
-						return &exitErr{code: ExitExternal, err: err}
+						return &exitErr{code: ExitGeneric, err: err}
 					}
 					if res.Cancelled {
 						return &exitErr{code: ExitUsage, err: errors.New("cancelled")}
@@ -173,7 +183,7 @@ default_repos and auto_repos_glob.
 				if !cfg.Linear.Enabled {
 					return &exitErr{code: ExitUsage, err: errors.New("--new-ticket requires linear (set [linear] enabled = true)")}
 				}
-				id, err := createTicket(cmd.Context(), s.deps.NewLinear(), cfg.Linear.DefaultTeam, newTicket, newTicketDescription)
+				id, err := createTicket(cmd.Context(), s.deps.NewLinear(cfg), cfg.Linear.DefaultTeam, newTicket, newTicketDescription)
 				if err != nil {
 					return err
 				}
@@ -186,29 +196,34 @@ default_repos and auto_repos_glob.
 			// Otherwise default to no-ticket (preserves AI / pipe behaviour).
 			// Projects never take an issue, so they skip it entirely.
 			if ticket == "" && !noTicket && !projectMode && cfg.Linear.Enabled && isInteractive(s.deps) && s.deps.TicketFlow != nil {
-				lc := s.deps.NewLinear()
+				lc := s.deps.NewLinear(cfg)
 				if err := lc.Available(cmd.Context()); err == nil {
-					res, err := s.deps.TicketFlow(cmd.Context(), lc, TicketFlowOptions{Team: cfg.Linear.DefaultTeam, AllowSkip: true}, s.deps.Stderr)
+					res, err := s.deps.TicketFlow(cmd.Context(), lc, tui.TicketFlowOptions{Team: cfg.Linear.DefaultTeam, AllowSkip: true}, s.deps.Stderr)
 					if err != nil {
-						return &exitErr{code: ExitExternal, err: err}
+						return &exitErr{code: ExitGeneric, err: err}
 					}
-					if res.Cancelled {
+					switch res.Action {
+					case tui.ActionCancelled:
 						return &exitErr{code: ExitUsage, err: errors.New("cancelled")}
-					}
-					switch {
-					case res.Ticket != "":
-						ticket = res.Ticket
-						titleForName = res.TicketTitle
-						offerAssign(cmd.Context(), s, lc, ticket, res.TicketUnassigned)
-					case res.NewTitle != "":
+					case tui.ActionPick:
+						ticket = res.IssueID
+						titleForName = res.IssueTitle
+						offerAssign(cmd.Context(), s, lc, ticket, res.IssueUnassigned)
+					case tui.ActionCreate:
 						id, err := createTicket(cmd.Context(), lc, cfg.Linear.DefaultTeam, res.NewTitle, res.NewDescription)
 						if err != nil {
 							return err
 						}
 						ticket = id
 						titleForName = res.NewTitle
+					case tui.ActionSkip:
+						// Continue with no ticket.
+					default:
+						// Every action must be handled here by name: falling
+						// through would silently create a ticketless workspace
+						// after the user picked something in the TUI.
+						return &exitErr{code: ExitGeneric, err: fmt.Errorf("unhandled ticket-flow action %d", res.Action)}
 					}
-					// Skip path: continue with no ticket.
 				}
 			}
 
@@ -216,7 +231,7 @@ default_repos and auto_repos_glob.
 			// a pre-filled prompt when a terminal is available.
 			if short == "" {
 				if titleForName == "" && ticket != "" && cfg.Linear.Enabled && s.deps.NewLinear != nil {
-					t, err := issueTitleFor(cmd.Context(), s.deps.NewLinear(), ticket)
+					t, err := issueTitleFor(cmd.Context(), s.deps.NewLinear(cfg), ticket)
 					if err != nil {
 						// Interactively the prompt still works, just without a
 						// default; a script has no such fallback.
@@ -232,7 +247,7 @@ default_repos and auto_repos_glob.
 				case isInteractive(s.deps) && s.deps.NameFlow != nil:
 					res, err := s.deps.NameFlow(cmd.Context(), def, strings.ToLower(ticket), s.deps.Stderr)
 					if err != nil {
-						return &exitErr{code: ExitExternal, err: err}
+						return &exitErr{code: ExitGeneric, err: err}
 					}
 					if res.Cancelled || strings.TrimSpace(res.Name) == "" {
 						return &exitErr{code: ExitUsage, err: errors.New("cancelled: no workspace name")}
@@ -256,12 +271,12 @@ default_repos and auto_repos_glob.
 			if projectMode {
 				newOpts.Kind = workspace.KindProject
 			}
-			if s.verbose != nil && *s.verbose {
+			if s.verbose {
 				newOpts.Progress = s.deps.Stderr
 			}
 
 			if fromCurrent || carryContext {
-				current, err := resolveParentWorkspace(svc, cmd.Context(), s.deps.Cwd)
+				current, err := resolveParentWorkspace(cmd.Context(), svc, s.deps.Cwd)
 				if err != nil {
 					return &exitErr{code: ExitUsage, err: err}
 				}
@@ -279,7 +294,6 @@ default_repos and auto_repos_glob.
 						ParentName:      current.Ref,
 						ParentShortName: current.ShortName,
 						ParentTicket:    current.Ticket,
-						ParentTicketURL: current.TicketURL,
 					}
 				}
 			}
@@ -293,6 +307,11 @@ default_repos and auto_repos_glob.
 			var carryErr error
 			if carrySession != "" {
 				carrySrc, carryDst, carryErr = svc.MoveSessionFile(cmd.Context(), carrySession, ws.Path)
+			}
+			var forkNewID string
+			var forkErr error
+			if forkSession != "" {
+				_, _, forkNewID, forkErr = svc.ForkSessionFile(cmd.Context(), forkSession, ws.Path)
 			}
 
 			s.writer().JSONRecord(ws, func(out io.Writer) {
@@ -331,6 +350,14 @@ default_repos and auto_repos_glob.
 					fmt.Fprintf(s.deps.Stderr, "  carried session: %s → %s\n", carrySrc, carryDst)
 				}
 			}
+			if forkSession != "" {
+				if forkErr != nil {
+					fmt.Fprintf(s.deps.Stderr, "  ⚠ fork-session %s: %v\n", forkSession, forkErr)
+				} else {
+					fmt.Fprintf(s.deps.Stderr, "  forked session: %s → %s\n", forkSession, forkNewID)
+					fmt.Fprintf(s.deps.Stderr, "    resume it there: cd into the workspace, then `claude --resume %s`\n", forkNewID)
+				}
+			}
 			return nil
 		},
 	}
@@ -342,6 +369,7 @@ default_repos and auto_repos_glob.
 	c.Flags().BoolVar(&fromCurrent, "from-current", false, "branch new worktrees off the branches of the workspace you are standing in (a spin-off; contrast --from-parent, which stacks on the workspace this one is created inside)")
 	c.Flags().BoolVar(&carryContext, "carry-context", false, "seed the new CLAUDE.md with a 'Spun off from <parent>' header")
 	c.Flags().StringVar(&carrySession, "carry-session", "", "Claude Code session id (e.g. 2bba4a38-93e1-...) to move into the new workspace's project dir so /resume finds it after cd")
+	c.Flags().StringVar(&forkSession, "fork-session", "", "Claude Code session id to fork into the new workspace: the transcript is copied there under a fresh id, so the original session keeps running where it is")
 	c.Flags().BoolVar(&codeWorkspace, "code-workspace", false, "generate a .code-workspace file (also enabled by config generate_code_workspace)")
 	c.Flags().BoolVar(&projectMode, "project", false, "create a project workspace: a container for other workspaces, with no worktrees unless --repos is given")
 	c.Flags().StringVar(&in, "in", "", "ref of the workspace to create this one inside, or \".\" for the workspace containing cwd (default: the project containing cwd, if any)")
@@ -351,7 +379,7 @@ default_repos and auto_repos_glob.
 
 // resolveParentWorkspace finds the workspace that the current cwd is inside.
 // Used by --from-current and --carry-context.
-func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (string, error)) (*workspace.Workspace, error) {
+func resolveParentWorkspace(ctx context.Context, svc Service, cwdFn func() (string, error)) (*workspace.Workspace, error) {
 	if cwdFn == nil {
 		return nil, errors.New("--from-current/--carry-context: cwd resolver not configured")
 	}
@@ -378,8 +406,10 @@ func resolveParentWorkspace(svc Service, ctx context.Context, cwdFn func() (stri
 // Service.ProjectAt: standing in a task is the ordinary state of working in
 // one, so it means "a sibling", not "a child".
 //
-// Inference failures are not errors — being outside workspaces_dir entirely
-// is the normal case for a top-level `arat new`.
+// Not finding a parent is no error: being outside workspaces_dir entirely is
+// the normal case for a top-level `arat new`. A failure to inspect the tree
+// on the walk up (a broken marker) does surface rather than silently placing
+// the workspace at the top level.
 //
 // projectMode skips inference altogether: a project is always top level, so
 // running `arat new x --project` from inside a project must not try to nest
@@ -417,7 +447,17 @@ func resolveNewParent(ctx context.Context, svc Service, cwdFn func() (string, er
 		return "", nil
 	}
 	project, err := svc.ProjectAt(ctx, cwd)
-	if err != nil || project == nil {
+	if err != nil {
+		// Standing outside any workspace is the normal top-level case, not an
+		// error. Anything else — notably a broken marker on the walk up —
+		// must surface: silently creating the workspace at the top level
+		// would misplace it.
+		if errors.Is(err, workspace.ErrNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	if project == nil {
 		return "", nil
 	}
 	return project.Ref, nil
@@ -432,7 +472,7 @@ func mapNewError(err error) error {
 	case errors.Is(err, workspace.ErrInvalidInput):
 		return &exitErr{code: ExitUsage, err: err}
 	}
-	return &exitErr{code: ExitExternal, err: err}
+	return mapUnclassifiedError(err)
 }
 
 // isInteractive reports whether arat is running in a terminal where a TUI
@@ -471,7 +511,7 @@ func validateTicketFlags(ticket, newTicket, newTicketDescription string, noTicke
 // offerAssign asks whether to self-assign a just-picked unassigned issue and
 // does so on a yes. Best-effort by design: an assignment failure is a warning,
 // not a reason to abort creating the workspace the user already committed to.
-func offerAssign(ctx context.Context, s *state, lc LinearClient, ticket string, unassigned bool) {
+func offerAssign(ctx context.Context, s *state, lc issueAssigner, ticket string, unassigned bool) {
 	if !unassigned || s.deps.Confirm == nil {
 		return
 	}
@@ -489,7 +529,7 @@ func offerAssign(ctx context.Context, s *state, lc LinearClient, ticket string, 
 
 // issueTitleFor fetches an issue's title for name derivation, verifying the
 // `linear` binary first so the error names the actual problem.
-func issueTitleFor(ctx context.Context, lc LinearClient, ticket string) (string, error) {
+func issueTitleFor(ctx context.Context, lc issueTitler, ticket string) (string, error) {
 	if err := lc.Available(ctx); err != nil {
 		return "", fmt.Errorf("`linear` binary unavailable: %w", err)
 	}
@@ -500,7 +540,7 @@ func issueTitleFor(ctx context.Context, lc LinearClient, ticket string) (string,
 // given title (and optional description), using the configured default team
 // and the conventional "Backlog" state. Returns the new id (lowercased to
 // match arat's storage convention) or a typed exit error.
-func createTicket(ctx context.Context, lc LinearClient, team, title, description string) (string, error) {
+func createTicket(ctx context.Context, lc issueCreator, team, title, description string) (string, error) {
 	if err := lc.Available(ctx); err != nil {
 		return "", &exitErr{code: ExitExternal, err: fmt.Errorf("`linear` binary unavailable: %w", err)}
 	}

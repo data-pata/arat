@@ -43,8 +43,8 @@ repo are skipped rather than errors, so it is safe to run over a tree where
 some members already have it. Every workspace branches off the same base —
 fan-out never stacks children on their parent's branch.
 
-Regenerates <name>.code-workspace if one already exists. Does not edit
-CLAUDE.md — its **Repos**: line may be stale until you re-render it.
+Regenerates <name>.code-workspace if one already exists, and updates the
+**Repos**: line in CLAUDE.md to match what the workspace now carries.
 `,
 		Example: `  arat repo add ui-app
   arat repo add core-mono ui-app --workspace abc-123--postal-fix
@@ -56,7 +56,10 @@ CLAUDE.md — its **Repos**: line may be stale until you re-render it.
 			if err != nil {
 				return err
 			}
-			svc := s.deps.NewService(cfg)
+			svc, err := s.service(cfg)
+			if err != nil {
+				return err
+			}
 			name := wsName
 			if name == "" {
 				if s.deps.Cwd == nil {
@@ -130,5 +133,5 @@ func mapAddReposError(err error) error {
 	case errors.As(err, &pre):
 		return &exitErr{code: ExitPrecondition, err: err}
 	}
-	return &exitErr{code: ExitExternal, err: err}
+	return mapUnclassifiedError(err)
 }

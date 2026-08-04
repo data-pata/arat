@@ -48,6 +48,12 @@ type Workspace struct {
 	Linear  *LinearRef   `json:"linear,omitempty"`
 	Created time.Time    `json:"created"`
 	Repos   []RepoStatus `json:"repos"`
+	// MetaError records a marker file (MetaFile) that exists but could not be
+	// read or parsed. The fault is scoped to this workspace: the tree walk
+	// carries on, Kind degrades to KindTask, and structural operations
+	// (nesting, attach, link) refuse to build on it while `arat rm` still
+	// works — removal is how a broken workspace gets repaired.
+	MetaError string `json:"meta_error,omitempty"`
 	// Children are the nested workspaces of a project, sorted by name.
 	// Always empty for a task workspace.
 	Children []Workspace `json:"children,omitempty"`

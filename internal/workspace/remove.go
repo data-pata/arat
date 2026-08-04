@@ -34,22 +34,80 @@ func (e *ErrNotEmpty) Error() string {
 // RemoveOptions controls Service.Remove.
 type RemoveOptions struct {
 	Name         string
-	Force        bool // skip safety checks (dirty/unpushed)
+	Force        bool // skip safety checks (dirty/unpushed/scratch content)
 	KeepBranches bool // do not delete the branches when removing worktrees
 	// Recursive permits removing a workspace that still contains nested
 	// workspaces. Without it, such a removal is refused: deleting the
 	// directory takes every workspace under it with it, and that is too
 	// much to do on the strength of one name on the command line.
 	Recursive bool
+	// DeleteScratch permits deleting a non-empty claude_workspace/ scratch
+	// dir. Scratch content is never committed or pushed anywhere, so without
+	// this (or Force) Remove refuses with *ErrScratchNotEmpty; the caller is
+	// expected to show the listing, ask, and re-run with this set.
+	DeleteScratch bool
 }
 
-// RemoveResult is the outcome of Service.Remove.
+// ScratchContent is the claude_workspace/ content of one workspace slated
+// for removal, reported on *ErrScratchNotEmpty.
+type ScratchContent struct {
+	Ref   string
+	Files []string // slash-separated paths relative to the scratch dir, sorted
+}
+
+// ErrScratchNotEmpty means Remove was asked to delete a workspace whose
+// claude_workspace/ still holds content, without Force or DeleteScratch.
+//
+// It is kept apart from ErrPrecondition for the same reason ErrNotEmpty is:
+// the git preconditions guard work that survives elsewhere (commits, stashes
+// on the canonical clone), whereas scratch content exists nowhere else at
+// all, so callers surface it with its full listing before letting it go.
+type ErrScratchNotEmpty struct {
+	Contents []ScratchContent
+}
+
+func (e *ErrScratchNotEmpty) Error() string {
+	refs := make([]string, 0, len(e.Contents))
+	files := 0
+	for _, c := range e.Contents {
+		refs = append(refs, c.Ref)
+		files += len(c.Files)
+	}
+	return fmt.Sprintf("claude_workspace in %s holds %d %s that would be deleted with no way back",
+		strings.Join(refs, ", "), files, pluralWord(files, "file", "files"))
+}
+
+// pluralWord picks the singular or plural form for a count.
+func pluralWord(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// RemoveResult is the outcome of Service.Remove. On error it is returned
+// alongside the error, partially populated, so callers can report how far
+// the teardown got instead of only that one git command failed — the same
+// contract AddRepos keeps, and more important here because the operation is
+// destructive.
 type RemoveResult struct {
 	// Removed lists the refs of every workspace deleted: the target first,
 	// then its descendants. Recursive removal is the one place the tool
 	// destroys things the user did not name, so the caller can show exactly
-	// what went.
+	// what went. Populated only once the removal actually completed — on a
+	// partial failure it stays empty and RemovedWorktrees carries the
+	// progress instead.
 	Removed []string
+	// RemovedWorktrees lists the worktree paths torn down so far, appended
+	// as each removal completes. On success it covers every worktree; on
+	// error it is the teardown's actual progress.
+	RemovedWorktrees []string
+	// Warnings lists non-fatal teardown problems, currently branch deletes
+	// that failed (e.g. the branch checked out in a worktree outside this
+	// workspace). The worktree is already gone when the delete runs, so
+	// aborting the removal over it would leave a half-torn-down workspace
+	// over state one git command can clear.
+	Warnings []string
 	// StashedRepos lists canonical repos whose stash entries were touched by
 	// the removal, one entry per canonical repo. The stash refs themselves
 	// live on the canonical clone's .git/refs/stash and survive the worktree
@@ -120,10 +178,26 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 		}
 	}
 
-	res := &RemoveResult{}
-	for _, target := range targets {
-		res.Removed = append(res.Removed, target.Ref)
+	// Scratch content is checked after the git preconditions so an
+	// interactive caller confirms its deletion only once the git state is
+	// already clear — otherwise a confirmed re-run could still refuse.
+	if !opts.Force && !opts.DeleteScratch {
+		var contents []ScratchContent
+		for _, target := range targets {
+			files, err := scratchFiles(target.Path)
+			if err != nil {
+				return nil, err
+			}
+			if len(files) > 0 {
+				contents = append(contents, ScratchContent{Ref: target.Ref, Files: files})
+			}
+		}
+		if len(contents) > 0 {
+			return nil, &ErrScratchNotEmpty{Contents: contents}
+		}
 	}
+
+	res := &RemoveResult{}
 	// One stash note per canonical repo: the stash refs live there, so
 	// repeating the note for every removed worktree of the same repo would
 	// just re-announce the same refs.
@@ -131,7 +205,7 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 	for _, wt := range worktrees {
 		canonical := s.Git.CanonicalRepoPath(ctx, wt.path)
 		if canonical == "" {
-			return nil, fmt.Errorf("could not resolve canonical repo for %s", wt.path)
+			return res, fmt.Errorf("could not resolve canonical repo for %s", wt.path)
 		}
 		if wt.ins != nil && wt.ins.Stashes > 0 {
 			if i, dup := stashedIdx[canonical]; dup {
@@ -146,18 +220,28 @@ func (s *Service) Remove(ctx context.Context, opts RemoveOptions) (*RemoveResult
 			}
 		}
 		if err := s.Git.WorktreeRemove(ctx, canonical, wt.path, opts.Force); err != nil {
-			return nil, err
+			// Partial teardown: hand back what already went so the caller
+			// can say how far it got. Re-running Remove is safe — worktrees
+			// already gone are simply no longer found.
+			return res, fmt.Errorf("removed %d of %d worktrees, then: %w", len(res.RemovedWorktrees), len(worktrees), err)
 		}
+		res.RemovedWorktrees = append(res.RemovedWorktrees, wt.path)
 		if !opts.KeepBranches && wt.branch() != "" {
-			// best-effort branch delete; if checked out elsewhere it'll fail and we warn.
+			// Best-effort: the worktree is gone by now, so aborting here
+			// would strand a half-removed workspace over a branch the user
+			// can delete with one command. Warn and carry on.
 			if err := s.Git.BranchDelete(ctx, canonical, wt.branch(), true); err != nil {
-				return nil, fmt.Errorf("worktree removed but branch delete failed (%s in %s): %w", wt.branch(), canonical, err)
+				res.Warnings = append(res.Warnings,
+					fmt.Sprintf("branch %s in %s not deleted: %v", wt.branch(), canonical, err))
 			}
 		}
 	}
 
 	if err := os.RemoveAll(full); err != nil {
-		return nil, err
+		return res, err
+	}
+	for _, target := range targets {
+		res.Removed = append(res.Removed, target.Ref)
 	}
 	return res, nil
 }

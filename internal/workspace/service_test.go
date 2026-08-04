@@ -48,6 +48,9 @@ func (*fakeInspector) BranchRename(context.Context, string, string, string) erro
 func (*fakeInspector) WorktreeRepair(context.Context, string, ...string) error {
 	panic("unused in List tests")
 }
+func (*fakeInspector) WorktreePrune(context.Context, string) error {
+	panic("unused in List tests")
+}
 func (*fakeInspector) BranchExists(context.Context, string, string) bool { return false }
 func (f *fakeInspector) InspectFast(dir string) (string, string) {
 	if i, ok := f.insp[dir]; ok {
@@ -92,7 +95,7 @@ func TestService_List(t *testing.T) {
 		Git:           insp,
 	}
 
-	got, err := svc.List(t.Context())
+	got, err := svc.List(t.Context(), ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
@@ -147,7 +150,7 @@ func TestService_List_singleRepoWorkspace(t *testing.T) {
 		TicketRE:      regexp.MustCompile(`^[a-z]+-[0-9]+$`),
 		Git:           insp,
 	}
-	got, err := svc.List(t.Context())
+	got, err := svc.List(t.Context(), ListOptions{})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Len(t, got[0].Repos, 1, "single-repo workspace should produce exactly one repo entry, not one per top-level subdir")
@@ -163,7 +166,7 @@ func TestService_List_missingDir(t *testing.T) {
 		TicketRE:      regexp.MustCompile(`^[a-z]+-[0-9]+$`),
 		Git:           &fakeInspector{},
 	}
-	_, err := svc.List(t.Context())
+	_, err := svc.List(t.Context(), ListOptions{})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrNoWorkspacesDir))
 }
