@@ -132,7 +132,7 @@ func (s *Service) addReposToOne(ctx context.Context, ws Workspace, repos []strin
 	for _, r := range ws.Repos {
 		existing[r.Name] = struct{}{}
 	}
-	branch := deriveBranch(&ws, s.BranchPrefix)
+	branch := s.deriveBranch(&ws)
 
 	var toAdd []string
 	for _, repo := range repos {
@@ -203,14 +203,20 @@ func (s *Service) addReposToOne(ctx context.Context, ws Workspace, repos []strin
 	return outcome, nil
 }
 
-// deriveBranch returns the feature branch shared by all worktrees in the
-// workspace. Prefer reading from an existing worktree (handles renames done
-// by `ticket attach`); fall back to recomputing from the configured prefix.
-func deriveBranch(ws *Workspace, prefix string) string {
+// deriveBranch returns the workspace's feature branch. Prefer reading it from
+// an existing worktree (handles renames done by `ticket attach`), falling back
+// to recomputing from the configured prefix. Only linked worktrees of a
+// canonical clone at Root qualify: a standalone clone parked in the workspace
+// dir is not arat's, and its checked-out branch (typically main) must not
+// become the branch for newly added repos.
+func (s *Service) deriveBranch(ws *Workspace) string {
 	for _, r := range ws.Repos {
-		if r.Branch != "" {
+		if r.Branch == "" {
+			continue
+		}
+		if _, canonical := s.Git.InspectFast(r.Path); canonical != "" && filepath.Dir(canonical) == filepath.Clean(s.Root) {
 			return r.Branch
 		}
 	}
-	return BranchName(prefix, ws.ShortName, ws.Ticket)
+	return BranchName(s.BranchPrefix, ws.ShortName, ws.Ticket)
 }

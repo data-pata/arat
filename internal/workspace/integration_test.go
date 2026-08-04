@@ -759,6 +759,29 @@ func TestAddRepos_derivesBranchFromExistingWorktree(t *testing.T) {
 	assert.Equal(t, "ps--feat--abc-7", res.Outcomes[0].Added[0].Branch)
 }
 
+func TestAddRepos_derivationIgnoresStandaloneClone(t *testing.T) {
+	// A standalone clone parked inside the workspace dir is git-recognised and
+	// so hydrates as one of the workspace's repos, but it is not an arat
+	// worktree. Its checked-out branch (main) must not drive the branch for
+	// newly added repos: main exists in every canonical, so deriving it makes
+	// the collision check refuse the add.
+	root := setupRoot(t, "repo-a", "repo-b")
+	svc := newSvc(t, root)
+
+	ws, err := svc.New(t.Context(), NewOptions{ShortName: "feat", Ticket: "abc-1", Repos: []string{"repo-a"}})
+	require.NoError(t, err)
+	// Sorts before repo-a, so unfiltered derivation would pick its branch.
+	runGit(t, ws.Path, "clone", filepath.Join(root, "repo-b"), "a-clone")
+
+	res, err := svc.AddRepos(t.Context(), AddReposOptions{
+		Workspace: "abc-1--feat",
+		Repos:     []string{"repo-b"},
+	})
+	require.NoError(t, err)
+	require.Len(t, res.Outcomes[0].Added, 1)
+	assert.Equal(t, "ps--feat--abc-1", res.Outcomes[0].Added[0].Branch)
+}
+
 func TestAddRepos_regeneratesCodeWorkspace(t *testing.T) {
 	root := setupRoot(t, "repo-a", "repo-b")
 	svc := newSvc(t, root)
